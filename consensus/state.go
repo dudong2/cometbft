@@ -174,7 +174,7 @@ func NewState(
 
 	cs.updateToState(state)
 
-	// NOTE: we do not call scheduleRound0 yet, we do that upon Start()
+	// NOTE: we do not call scheduleNewHeightRound0 yet, we do that upon Start()
 
 	cs.BaseService = *service.NewBaseService(nil, "State", cs)
 	for _, option := range options {
@@ -373,7 +373,7 @@ func (cs *State) OnStart() error {
 
 	// schedule the first round!
 	// use GetRoundState so we don't race the receiveRoutine for access
-	cs.scheduleRound0(cs.GetRoundState())
+	cs.scheduleNewHeightRound0(cs.GetRoundState())
 
 	return nil
 }
@@ -481,7 +481,7 @@ func (cs *State) updateHeight(height int64) {
 	cs.Height = height
 }
 
-func (cs *State) updateRoundStep(round int32, step cstypes.RoundStepType) {
+func (cs *State) updateRoundAndStep(round int32, step cstypes.RoundStepType) {
 	if !cs.replayMode {
 		if round != cs.Round || round == 0 && step == cstypes.RoundStepNewRound {
 			cs.metrics.MarkRound(cs.Round, cs.StartTime)
@@ -495,8 +495,8 @@ func (cs *State) updateRoundStep(round int32, step cstypes.RoundStepType) {
 }
 
 // enterNewRound(height, 0) at cs.StartTime.
-func (cs *State) scheduleRound0(rs *cstypes.RoundState) {
-	// cs.Logger.Info("scheduleRound0", "now", cmttime.Now(), "startTime", cs.StartTime)
+func (cs *State) scheduleNewHeightRound0(rs *cstypes.RoundState) {
+	// cs.Logger.Info("scheduleNewHeightRound0", "now", cmttime.Now(), "startTime", cs.StartTime)
 	sleepDuration := rs.StartTime.Sub(cmttime.Now())
 	cs.scheduleTimeout(sleepDuration, rs.Height, 0, cstypes.RoundStepNewHeight)
 }
@@ -652,7 +652,7 @@ func (cs *State) updateToState(state sm.State) {
 
 	// RoundState fields
 	cs.updateHeight(height)
-	cs.updateRoundStep(0, cstypes.RoundStepNewHeight)
+	cs.updateRoundAndStep(0, cstypes.RoundStepNewHeight)
 
 	if cs.CommitTime.IsZero() {
 		// "Now" makes it easier to sync up dev nodes.
@@ -1011,7 +1011,7 @@ func (cs *State) enterNewRound(height int64, round int32) {
 	// Setup new round
 	// we don't fire newStep for this step,
 	// but we fire an event, so update the round step first
-	cs.updateRoundStep(round, cstypes.RoundStepNewRound)
+	cs.updateRoundAndStep(round, cstypes.RoundStepNewRound)
 	cs.Validators = validators
 	// If round == 0, we've already reset these upon new height, and meanwhile
 	// we might have received a proposal for round 0.
@@ -1080,7 +1080,7 @@ func (cs *State) enterPropose(height int64, round int32) {
 
 	defer func() {
 		// Done enterPropose:
-		cs.updateRoundStep(round, cstypes.RoundStepPropose)
+		cs.updateRoundAndStep(round, cstypes.RoundStepPropose)
 		cs.newStep()
 
 		// If we have the whole proposal + POL, then goto Prevote now.
@@ -1257,7 +1257,7 @@ func (cs *State) enterPrevote(height int64, round int32) {
 
 	defer func() {
 		// Done enterPrevote:
-		cs.updateRoundStep(round, cstypes.RoundStepPrevote)
+		cs.updateRoundAndStep(round, cstypes.RoundStepPrevote)
 		cs.newStep()
 	}()
 
@@ -1353,7 +1353,7 @@ func (cs *State) enterPrevoteWait(height int64, round int32) {
 
 	defer func() {
 		// Done enterPrevoteWait:
-		cs.updateRoundStep(round, cstypes.RoundStepPrevoteWait)
+		cs.updateRoundAndStep(round, cstypes.RoundStepPrevoteWait)
 		cs.newStep()
 	}()
 
@@ -1382,7 +1382,7 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 
 	defer func() {
 		// Done enterPrecommit:
-		cs.updateRoundStep(round, cstypes.RoundStepPrecommit)
+		cs.updateRoundAndStep(round, cstypes.RoundStepPrecommit)
 		cs.newStep()
 	}()
 
@@ -1537,7 +1537,7 @@ func (cs *State) enterCommit(height int64, commitRound int32) {
 	defer func() {
 		// Done enterCommit:
 		// keep cs.Round the same, commitRound points to the right Precommits set.
-		cs.updateRoundStep(cs.Round, cstypes.RoundStepCommit)
+		cs.updateRoundAndStep(cs.Round, cstypes.RoundStepCommit)
 		cs.CommitRound = commitRound
 		cs.CommitTime = cmttime.Now()
 		cs.newStep()
@@ -1726,7 +1726,7 @@ func (cs *State) finalizeCommit(height int64) {
 
 	// cs.StartTime is already set.
 	// Schedule Round0 to start soon.
-	cs.scheduleRound0(&cs.RoundState)
+	cs.scheduleNewHeightRound0(&cs.RoundState)
 
 	// By here,
 	// * cs.Height has been increment to height+1
