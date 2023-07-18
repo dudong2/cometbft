@@ -198,7 +198,7 @@ LOOP:
 		os.Remove(walFile)
 
 		// set crashing WAL
-		csWal, err := cs.OpenWAL(walFile)
+		csWal, err := OpenWAL(walFile, cs.Logger)
 		require.NoError(t, err)
 		crashingWal.next = csWal
 

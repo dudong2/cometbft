@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -432,3 +433,69 @@ func (nilWAL) SearchForEndHeight(int64, *WALSearchOptions) (rd io.ReadCloser, fo
 func (nilWAL) Start() error { return nil }
 func (nilWAL) Stop() error  { return nil }
 func (nilWAL) Wait()        {}
+
+// OpenWAL opens a file to log all consensus messages and timeouts for
+// deterministic accountability.
+func OpenWAL(walFile string, l log.Logger) (WAL, error) {
+	wal, err := NewWAL(walFile)
+	if err != nil {
+		l.Error("failed to open WAL", "file", walFile, "err", err)
+		return nil, err
+	}
+
+	wal.SetLogger(l.With("wal", walFile))
+
+	if err := wal.Start(); err != nil {
+		l.Error("failed to start WAL", "err", err)
+		return nil, err
+	}
+
+	return wal, nil
+}
+
+// loadWalFile loads WAL data from file. It overwrites cs.wal.
+func loadWalFile(walFile string, l log.Logger) (WAL, error) {
+	wal, err := OpenWAL(walFile, l)
+	if err != nil {
+		l.Error("failed to load state WAL", "err", err)
+		return nil, err
+	}
+
+	return wal, nil
+}
+
+// repairWalFile decodes messages from src (until the decoder errors) and
+// writes them to dst.
+func repairWalFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	var (
+		dec = NewWALDecoder(in)
+		enc = NewWALEncoder(out)
+	)
+
+	// best-case repair (until first error is encountered)
+	for {
+		msg, err := dec.Decode()
+		if err != nil {
+			break
+		}
+
+		err = enc.Encode(msg)
+		if err != nil {
+			return fmt.Errorf("failed to encode msg: %w", err)
+		}
+	}
+
+	return nil
+}

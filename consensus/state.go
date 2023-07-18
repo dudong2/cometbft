@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"runtime/debug"
 	"sort"
 	"time"
@@ -236,8 +235,8 @@ func (cs *State) GetLastHeight() int64 {
 // GetRoundState returns a shallow copy of the internal consensus state.
 func (cs *State) GetRoundState() *cstypes.RoundState {
 	cs.mtx.RLock()
+	defer cs.mtx.RUnlock()
 	rs := cs.RoundState // copy
-	cs.mtx.RUnlock()
 	return &rs
 }
 
@@ -279,8 +278,8 @@ func (cs *State) SetPrivValidator(priv types.PrivValidator) {
 // testing.
 func (cs *State) SetTimeoutTicker(timeoutTicker TimeoutTicker) {
 	cs.mtx.Lock()
+	defer cs.mtx.Unlock()
 	cs.timeoutTicker = timeoutTicker
-	cs.mtx.Unlock()
 }
 
 // LoadCommit loads the commit for a given height.
@@ -298,10 +297,12 @@ func (cs *State) LoadCommit(height int64) *types.Commit {
 // OnStart loads the latest state via the WAL, and starts the timeout and
 // receive routines.
 func (cs *State) OnStart() error {
+	var err error
+
 	// We may set the WAL in testing before calling Start, so only OpenWAL if its
 	// still the nilWAL.
 	if _, ok := cs.wal.(nilWAL); ok {
-		if err := cs.loadWalFile(); err != nil {
+		if cs.wal, err = loadWalFile(cs.config.WalFile(), cs.Logger); err != nil {
 			return err
 		}
 	}
@@ -311,7 +312,7 @@ func (cs *State) OnStart() error {
 	// NOTE: we will get a build up of garbage go routines
 	// firing on the tockChan until the receiveRoutine is started
 	// to deal with them (by that point, at most one will be valid)
-	if err := cs.timeoutTicker.Start(); err != nil {
+	if err = cs.timeoutTicker.Start(); err != nil {
 		return err
 	}
 
@@ -322,7 +323,8 @@ func (cs *State) OnStart() error {
 
 	LOOP:
 		for {
-			err := cs.catchupReplay(cs.Height)
+
+			err = cs.catchupReplay(cs.Height)
 			switch {
 			case err == nil:
 				break LOOP
@@ -338,7 +340,7 @@ func (cs *State) OnStart() error {
 			cs.Logger.Error("the WAL file is corrupted; attempting repair", "err", err)
 
 			// 1) prep work
-			if err := cs.wal.Stop(); err != nil {
+			if err = cs.wal.Stop(); err != nil {
 				return err
 			}
 
@@ -346,14 +348,14 @@ func (cs *State) OnStart() error {
 
 			// 2) backup original WAL file
 			corruptedFile := fmt.Sprintf("%s.CORRUPTED", cs.config.WalFile())
-			if err := cmtos.CopyFile(cs.config.WalFile(), corruptedFile); err != nil {
+			if err = cmtos.CopyFile(cs.config.WalFile(), corruptedFile); err != nil {
 				return err
 			}
 
 			cs.Logger.Debug("backed up WAL file", "src", cs.config.WalFile(), "dst", corruptedFile)
 
 			// 3) try to repair (WAL file will be overwritten!)
-			if err := repairWalFile(corruptedFile, cs.config.WalFile()); err != nil {
+			if err = repairWalFile(corruptedFile, cs.config.WalFile()); err != nil {
 				cs.Logger.Error("the WAL repair failed", "err", err)
 				return err
 			}
@@ -361,18 +363,18 @@ func (cs *State) OnStart() error {
 			cs.Logger.Info("successful WAL repair")
 
 			// reload WAL file
-			if err := cs.loadWalFile(); err != nil {
+			if cs.wal, err = loadWalFile(cs.config.WalFile(), cs.Logger); err != nil {
 				return err
 			}
 		}
 	}
 
-	if err := cs.evsw.Start(); err != nil {
+	if err = cs.evsw.Start(); err != nil {
 		return err
 	}
 
 	// Double Signing Risk Reduction
-	if err := cs.checkDoubleSigningRisk(cs.Height); err != nil {
+	if err = cs.checkDoubleSigningRisk(cs.Height); err != nil {
 		return err
 	}
 
@@ -389,25 +391,12 @@ func (cs *State) OnStart() error {
 // timeoutRoutine: receive requests for timeouts on tickChan and fire timeouts on tockChan
 // receiveRoutine: serializes processing of proposoals, block parts, votes; coordinates state transitions
 func (cs *State) startRoutines(maxSteps int) {
-	err := cs.timeoutTicker.Start()
-	if err != nil {
+	if err := cs.timeoutTicker.Start(); err != nil {
 		cs.Logger.Error("failed to start timeout ticker", "err", err)
 		return
 	}
 
 	go cs.receiveRoutine(maxSteps)
-}
-
-// loadWalFile loads WAL data from file. It overwrites cs.wal.
-func (cs *State) loadWalFile() error {
-	wal, err := cs.OpenWAL(cs.config.WalFile())
-	if err != nil {
-		cs.Logger.Error("failed to load state WAL", "err", err)
-		return err
-	}
-
-	cs.wal = wal
-	return nil
 }
 
 // OnStop implements service.Service.
@@ -427,25 +416,6 @@ func (cs *State) OnStop() {
 // any event channels or this may deadlock
 func (cs *State) Wait() {
 	<-cs.done
-}
-
-// OpenWAL opens a file to log all consensus messages and timeouts for
-// deterministic accountability.
-func (cs *State) OpenWAL(walFile string) (WAL, error) {
-	wal, err := NewWAL(walFile)
-	if err != nil {
-		cs.Logger.Error("failed to open WAL", "file", walFile, "err", err)
-		return nil, err
-	}
-
-	wal.SetLogger(cs.Logger.With("wal", walFile))
-
-	if err := wal.Start(); err != nil {
-		cs.Logger.Error("failed to start WAL", "err", err)
-		return nil, err
-	}
-
-	return wal, nil
 }
 
 //------------------------------------------------------------
@@ -566,18 +536,18 @@ func (cs *State) sendInternalMessage(mi msgInfo) {
 // extension data.
 func (cs *State) reconstructLastCommit(state sm.State) {
 	extensionsEnabled := state.ConsensusParams.ABCI.VoteExtensionsEnabled(state.LastBlockHeight)
-	if !extensionsEnabled {
-		votes, err := cs.votesFromSeenCommit(state)
+	if extensionsEnabled {
+		votes, err := cs.votesFromExtendedCommit(state)
 		if err != nil {
-			panic(fmt.Sprintf("failed to reconstruct last commit; %s", err))
+			panic(fmt.Sprintf("failed to reconstruct last extended commit; %s", err))
 		}
 		cs.LastCommit = votes
 		return
 	}
 
-	votes, err := cs.votesFromExtendedCommit(state)
+	votes, err := cs.votesFromSeenCommit(state)
 	if err != nil {
-		panic(fmt.Sprintf("failed to reconstruct last extended commit; %s", err))
+		panic(fmt.Sprintf("failed to reconstruct last commit; %s", err))
 	}
 	cs.LastCommit = votes
 }
@@ -736,8 +706,6 @@ func (cs *State) newStep() {
 		cs.Logger.Error("failed writing to WAL", "err", err)
 	}
 
-	cs.nSteps++
-
 	// newStep is called by updateToState in NewState before the eventBus is set!
 	if cs.eventBus != nil {
 		if err := cs.eventBus.PublishEventNewRoundStep(rs); err != nil {
@@ -746,6 +714,8 @@ func (cs *State) newStep() {
 
 		cs.evsw.FireEvent(types.EventNewRoundStep, &cs.RoundState)
 	}
+
+	cs.nSteps++ // just for test
 }
 
 //-----------------------------------------
@@ -1940,7 +1910,9 @@ func (cs *State) addProposalBlockPart(msg *BlockPartMessage, peerID p2p.ID) (add
 	}
 
 	cs.metrics.BlockGossipPartsReceived.With("matches_current", "true").Add(1)
-	if !added {
+	if added {
+		cs.evsw.FireEvent(types.EventProposalBlockPart, msg)
+	} else {
 		// NOTE: we are disregarding possible duplicates above where heights dont match or we're not expecting block parts yet
 		// but between the matches_current = true and false, we have all the info.
 		cs.metrics.DuplicateBlockPart.Add(1)
@@ -2502,40 +2474,4 @@ func CompareHRS(h1 int64, r1 int32, s1 cstypes.RoundStepType, h2 int64, r2 int32
 		return 1
 	}
 	return 0
-}
-
-// repairWalFile decodes messages from src (until the decoder errors) and
-// writes them to dst.
-func repairWalFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	var (
-		dec = NewWALDecoder(in)
-		enc = NewWALEncoder(out)
-	)
-
-	// best-case repair (until first error is encountered)
-	for {
-		msg, err := dec.Decode()
-		if err != nil {
-			break
-		}
-
-		err = enc.Encode(msg)
-		if err != nil {
-			return fmt.Errorf("failed to encode msg: %w", err)
-		}
-	}
-
-	return nil
 }
