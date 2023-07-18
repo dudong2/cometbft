@@ -30,16 +30,6 @@ import (
 	cmttime "github.com/cometbft/cometbft/types/time"
 )
 
-// Consensus sentinel errors
-var (
-	ErrInvalidProposalSignature   = errors.New("error invalid proposal signature")
-	ErrInvalidProposalPOLRound    = errors.New("error invalid proposal POL round")
-	ErrAddingVote                 = errors.New("error adding vote")
-	ErrSignatureFoundInPastBlocks = errors.New("found signature from the same key")
-
-	errPubKeyIsNotSet = errors.New("pubkey is not set. Look for \"Can't get private validator pubkey\" errors")
-)
-
 var msgQueueSize = 1000
 
 // msgs from the reactor which may update the state
@@ -1115,7 +1105,7 @@ func (cs *State) enterPropose(height int64, round int32) {
 	if cs.privValidatorPubKey == nil {
 		// If this node is a validator & proposer in the current round, it will
 		// miss the opportunity to create a block.
-		logger.Error("propose step; empty priv validator public key", "err", errPubKeyIsNotSet)
+		logger.Error("propose step; empty priv validator public key", "err", ErrPubKeyIsNotSet)
 		return
 	}
 
@@ -1238,7 +1228,7 @@ func (cs *State) createProposalBlock(ctx context.Context) (*types.Block, error) 
 	if cs.privValidatorPubKey == nil {
 		// If this node is a validator & proposer in the current round, it will
 		// miss the opportunity to create a block.
-		return nil, fmt.Errorf("propose step; empty priv validator public key, error: %w", errPubKeyIsNotSet)
+		return nil, fmt.Errorf("propose step; empty priv validator public key, error: %w", ErrPubKeyIsNotSet)
 	}
 
 	proposerAddr := cs.privValidatorPubKey.Address()
@@ -1771,7 +1761,7 @@ func (cs *State) recordMetrics(height int64, block *types.Block) {
 		if cs.privValidator != nil {
 			if cs.privValidatorPubKey == nil {
 				// Metrics won't be updated, but it's not critical.
-				cs.Logger.Error(fmt.Sprintf("recordMetrics: %v", errPubKeyIsNotSet))
+				cs.Logger.Error(fmt.Sprintf("recordMetrics: %v", ErrPubKeyIsNotSet))
 			} else {
 				address = cs.privValidatorPubKey.Address()
 			}
@@ -2002,7 +1992,7 @@ func (cs *State) tryAddVote(vote *types.Vote, peerID p2p.ID) (bool, error) {
 		//nolint: gocritic
 		if voteErr, ok := err.(*types.ErrVoteConflictingVotes); ok {
 			if cs.privValidatorPubKey == nil {
-				return false, errPubKeyIsNotSet
+				return false, ErrPubKeyIsNotSet
 			}
 
 			if bytes.Equal(vote.ValidatorAddress, cs.privValidatorPubKey.Address()) {
@@ -2293,7 +2283,7 @@ func (cs *State) signVote(
 	}
 
 	if cs.privValidatorPubKey == nil {
-		return nil, errPubKeyIsNotSet
+		return nil, ErrPubKeyIsNotSet
 	}
 
 	addr := cs.privValidatorPubKey.Address()
@@ -2363,7 +2353,7 @@ func (cs *State) signAddVote(
 
 	if cs.privValidatorPubKey == nil {
 		// Vote won't be signed, but it's not critical.
-		cs.Logger.Error(fmt.Sprintf("signAddVote: %v", errPubKeyIsNotSet))
+		cs.Logger.Error(fmt.Sprintf("signAddVote: %v", ErrPubKeyIsNotSet))
 		return
 	}
 
@@ -2453,25 +2443,4 @@ func (cs *State) calculatePrevoteMessageDelayMetrics() {
 	if ps.HasAll() {
 		cs.metrics.FullPrevoteDelay.With("proposer_address", cs.Validators.GetProposer().Address.String()).Set(pl[len(pl)-1].Timestamp.Sub(cs.Proposal.Timestamp).Seconds())
 	}
-}
-
-//---------------------------------------------------------
-
-func CompareHRS(h1 int64, r1 int32, s1 cstypes.RoundStepType, h2 int64, r2 int32, s2 cstypes.RoundStepType) int {
-	if h1 < h2 {
-		return -1
-	} else if h1 > h2 {
-		return 1
-	}
-	if r1 < r2 {
-		return -1
-	} else if r1 > r2 {
-		return 1
-	}
-	if s1 < s2 {
-		return -1
-	} else if s1 > s2 {
-		return 1
-	}
-	return 0
 }
