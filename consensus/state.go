@@ -588,19 +588,22 @@ func (cs *State) updateToState(state sm.State) {
 	}
 
 	if !cs.state.IsEmpty() {
-		if cs.state.LastBlockHeight > 0 && cs.state.LastBlockHeight+1 != cs.Height {
-			// This might happen when someone else is mutating cs.state.
-			// Someone forgot to pass in state.Copy() somewhere?!
-			panic(fmt.Sprintf(
-				"inconsistent cs.state.LastBlockHeight+1 %v vs cs.Height %v",
-				cs.state.LastBlockHeight+1, cs.Height,
-			))
-		}
-		if cs.state.LastBlockHeight > 0 && cs.Height == cs.state.InitialHeight {
-			panic(fmt.Sprintf(
-				"inconsistent cs.state.LastBlockHeight %v, expected 0 for initial height %v",
-				cs.state.LastBlockHeight, cs.state.InitialHeight,
-			))
+		if cs.state.LastBlockHeight > 0 {
+			if cs.state.LastBlockHeight+1 != cs.Height {
+				// This might happen when someone else is mutating cs.state.
+				// Someone forgot to pass in state.Copy() somewhere?!
+				panic(fmt.Sprintf(
+					"inconsistent cs.state.LastBlockHeight+1 %v vs cs.Height %v",
+					cs.state.LastBlockHeight+1, cs.Height,
+				))
+			}
+
+			if cs.Height == cs.state.InitialHeight {
+				panic(fmt.Sprintf(
+					"inconsistent cs.state.LastBlockHeight %v, expected 0 for initial height %v",
+					cs.state.LastBlockHeight, cs.state.InitialHeight,
+				))
+			}
 		}
 
 		// If state isn't further out than cs.state, just ignore.
@@ -625,15 +628,17 @@ func (cs *State) updateToState(state sm.State) {
 	switch {
 	case state.LastBlockHeight == 0: // Very first commit should be empty.
 		cs.LastCommit = (*types.VoteSet)(nil)
+
 	case cs.CommitRound > -1 && cs.Votes != nil: // Otherwise, use cs.Votes
-		if !cs.Votes.Precommits(cs.CommitRound).HasTwoThirdsMajority() {
+		precommitVoteSet := cs.Votes.Precommits(cs.CommitRound)
+		if !precommitVoteSet.HasTwoThirdsMajority() {
 			panic(fmt.Sprintf(
 				"wanted to form a commit, but precommits (H/R: %d/%d) didn't have 2/3+: %v",
 				state.LastBlockHeight, cs.CommitRound, cs.Votes.Precommits(cs.CommitRound),
 			))
 		}
 
-		cs.LastCommit = cs.Votes.Precommits(cs.CommitRound)
+		cs.LastCommit = precommitVoteSet
 
 	case cs.LastCommit == nil:
 		// NOTE: when consensus starts, it has no votes. reconstructLastCommit
@@ -841,10 +846,11 @@ func (cs *State) handleMsg(mi msgInfo) {
 		cs.mtx.Unlock()
 
 		cs.mtx.Lock()
-		if added && cs.ProposalBlockParts.IsComplete() {
-			cs.handleCompleteProposal(msg.Height)
-		}
 		if added {
+			if cs.ProposalBlockParts.IsComplete() {
+				cs.handleCompleteProposal(msg.Height)
+			}
+
 			cs.statsMsgQueue <- mi
 		}
 
