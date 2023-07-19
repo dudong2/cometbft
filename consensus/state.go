@@ -174,7 +174,7 @@ func NewState(
 
 	cs.updateToState(state)
 
-	// NOTE: we do not call scheduleNewHeightRound0 yet, we do that upon Start()
+	// NOTE: we do not call scheduleRound0 yet, we do that upon Start()
 
 	cs.BaseService = *service.NewBaseService(nil, "State", cs)
 	for _, option := range options {
@@ -373,7 +373,7 @@ func (cs *State) OnStart() error {
 
 	// schedule the first round!
 	// use GetRoundState so we don't race the receiveRoutine for access
-	cs.scheduleNewHeightRound0(cs.GetRoundState())
+	cs.scheduleRound0(cs.GetRoundState())
 
 	return nil
 }
@@ -495,8 +495,8 @@ func (cs *State) updateRoundAndStep(round int32, step cstypes.RoundStepType) {
 }
 
 // enterNewRound(height, 0) at cs.StartTime.
-func (cs *State) scheduleNewHeightRound0(rs *cstypes.RoundState) {
-	// cs.Logger.Info("scheduleNewHeightRound0", "now", cmttime.Now(), "startTime", cs.StartTime)
+func (cs *State) scheduleRound0(rs *cstypes.RoundState) {
+	// cs.Logger.Info("scheduleRound0", "now", cmttime.Now(), "startTime", cs.StartTime)
 	sleepDuration := rs.StartTime.Sub(cmttime.Now())
 	cs.scheduleTimeout(sleepDuration, rs.Height, 0, cstypes.RoundStepNewHeight)
 }
@@ -1732,7 +1732,7 @@ func (cs *State) finalizeCommit(height int64) {
 
 	// cs.StartTime is already set.
 	// Schedule Round0 to start soon.
-	cs.scheduleNewHeightRound0(&cs.RoundState)
+	cs.scheduleRound0(&cs.RoundState)
 
 	// By here,
 	// * cs.Height has been increment to height+1
