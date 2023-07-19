@@ -2253,8 +2253,10 @@ func (cs *State) addVote(vote *types.Vote, peerID p2p.ID) (added bool, err error
 		blockID, ok := precommits.TwoThirdsMajority()
 		if ok {
 			// Executed as TwoThirdsMajority could be from a higher round
-			cs.enterNewRound(height, vote.Round)
-			cs.enterPrecommit(height, vote.Round)
+			if cs.Round < vote.Round {
+				cs.enterNewRound(height, vote.Round)
+				cs.enterPrecommit(height, vote.Round)
+			}
 
 			if len(blockID.Hash) != 0 {
 				cs.enterCommit(height, vote.Round)
