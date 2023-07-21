@@ -1540,6 +1540,7 @@ func (cs *State) enterCommit(height int64, commitRound int32) {
 
 	logger.Debug("entering commit step", "current", log.NewLazySprintf("%v/%v/%v", cs.Height, cs.Round, cs.Step))
 
+	execTryFinalizeCommit := true
 	defer func() {
 		// Done enterCommit:
 		// keep cs.Round the same, commitRound points to the right Precommits set.
@@ -1549,7 +1550,9 @@ func (cs *State) enterCommit(height int64, commitRound int32) {
 		cs.newStep()
 
 		// Maybe finalize immediately.
-		cs.tryFinalizeCommit(height)
+		if execTryFinalizeCommit {
+			cs.tryFinalizeCommit(height)
+		}
 	}()
 
 	blockID, ok := cs.Votes.Precommits(commitRound).TwoThirdsMajority()
@@ -1568,6 +1571,14 @@ func (cs *State) enterCommit(height int64, commitRound int32) {
 
 	// If we don't have the block being committed, set up to get it.
 	if !cs.ProposalBlock.HashesTo(blockID.Hash) {
+		// If you don't have a commit block, we shouldn't execute finalizeCommit.
+		execTryFinalizeCommit = false
+		logger.Debug(
+			"we do not have the commit block; cannot execute tryFinalizeCommit",
+			"proposal_block", log.NewLazyBlockHash(cs.ProposalBlock),
+			"commit_block", blockID.Hash,
+		)
+
 		if !cs.ProposalBlockParts.HasHeader(blockID.PartSetHeader) {
 			logger.Info(
 				"commit is for a block we do not know about; set ProposalBlock=nil",
@@ -1600,17 +1611,6 @@ func (cs *State) tryFinalizeCommit(height int64) {
 	blockID, ok := cs.Votes.Precommits(cs.CommitRound).TwoThirdsMajority()
 	if !ok || len(blockID.Hash) == 0 {
 		logger.Error("failed attempt to finalize commit; there was no +2/3 majority or +2/3 was for nil")
-		return
-	}
-
-	if !cs.ProposalBlock.HashesTo(blockID.Hash) {
-		// TODO: this happens every time if we're not a validator (ugly logs)
-		// TODO: ^^ wait, why does it matter that we're a validator?
-		logger.Debug(
-			"failed attempt to finalize commit; we do not have the commit block",
-			"proposal_block", log.NewLazyBlockHash(cs.ProposalBlock),
-			"commit_block", blockID.Hash,
-		)
 		return
 	}
 
