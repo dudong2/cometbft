@@ -34,7 +34,8 @@ var msgQueueSize = 1000
 
 type PrevoteMajType uint8
 
-// precommit majority type for precommit voting
+// precommit majority type to determine which blocks to precommit votes on.
+// This is only used in the enterPrecommit function.
 const (
 	PrevoteMajTypeFail          = PrevoteMajType(0x00)
 	PrevoteMajTypeNilBlock      = PrevoteMajType(0x01)
@@ -1406,6 +1407,7 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 	// check for a polka
 	blockID, ok := cs.Votes.Prevotes(round).TwoThirdsMajority()
 
+	// Check the conditions for the majority of the prevote in advance.
 	prevoteMajType := PrevoteMajTypeUndefined
 	if !ok {
 		prevoteMajType = PrevoteMajTypeFail
@@ -1419,6 +1421,7 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 		prevoteMajType = PrevoteMajTypeUnknownBlock
 	}
 
+	// If prevote does not receive a +2/3 majority, perform a nil vote.
 	if prevoteMajType == PrevoteMajTypeFail {
 		if cs.LockedBlock != nil {
 			logger.Debug("precommit step; no +2/3 prevotes during enterPrecommit while we are locked; precommitting nil")
@@ -1439,6 +1442,8 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 	switch prevoteMajType {
 	case PrevoteMajTypeFail:
 		// already processed for nil vote
+
+	// If prevote receives a +2/3 majority for a nil block, perform a nil vote.
 	case PrevoteMajTypeNilBlock:
 		if cs.LockedBlock == nil {
 			logger.Debug("precommit step; +2/3 prevoted for nil")
@@ -1455,6 +1460,8 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 
 		cs.signAddVote(cmtproto.PrecommitType, nil, types.PartSetHeader{})
 
+	// If the prevote receives a +2/3 majority for the locked block,
+	// update the locked round and vote on that block.
 	case PrevoteMajTypeLockedBlock:
 		logger.Debug("precommit step; +2/3 prevoted locked block; relocking")
 		cs.LockedRound = round
@@ -1465,6 +1472,9 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 
 		cs.signAddVote(cmtproto.PrecommitType, blockID.Hash, blockID.PartSetHeader)
 
+	// If the prevote receives a +2/3 majority for a proposal block that is
+	// different from the locked block, it means that a POLC(proof-of-lock-change)
+	// has occurred. Update the locked block and vote on that block.
 	case PrevoteMajTypeProposalBlock:
 		logger.Debug("precommit step; +2/3 prevoted proposal block; locking", "hash", blockID.Hash)
 
@@ -1483,10 +1493,10 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 
 		cs.signAddVote(cmtproto.PrecommitType, blockID.Hash, blockID.PartSetHeader)
 
+	// There was a polka in this round for a block we don't have.
+	// Fetch that block, unlock, and precommit nil.
+	// The +2/3 prevotes for this round is the POL for our unlock.
 	case PrevoteMajTypeUnknownBlock:
-		// There was a polka in this round for a block we don't have.
-		// Fetch that block, unlock, and precommit nil.
-		// The +2/3 prevotes for this round is the POL for our unlock.
 		logger.Debug("precommit step; +2/3 prevotes for a block we do not have; voting nil", "block_id", blockID)
 
 		cs.LockedRound = -1
@@ -1570,6 +1580,7 @@ func (cs *State) enterCommit(height int64, commitRound int32) {
 		cs.newStep()
 
 		// Maybe finalize immediately.
+		// We only perform the tryFinalizeCommit function if we have a block that is being committed.
 		if execTryFinalizeCommit {
 			cs.tryFinalizeCommit(height)
 		}
@@ -2042,6 +2053,7 @@ func (cs *State) processAddVote(vote *types.Vote, peerID p2p.ID) (bool, error) {
 		return cs.addVoteProcessErr(vote, false, err)
 	}
 
+	// add vote
 	height := cs.Height
 	if ok, added, err := cs.addVote(vote, peerID, extEnabled); !ok {
 		return cs.addVoteProcessErr(vote, added, err)
@@ -2121,6 +2133,9 @@ func (cs *State) addVoteProcessErr(vote *types.Vote, added bool, err error) (boo
 	return added, nil
 }
 
+// Handles the case where a vote of the past height arrives.
+// If a vote of the previous height arrives during the timeout commit,
+// it can be added to LastCommit. Otherwise, ignore the vote.
 func (cs *State) addVoteCheckPrevVote(vote *types.Vote, peerID p2p.ID) (ok bool, added bool, err error) {
 	// A precommit for the previous height?
 	// These come in while we wait timeoutCommit
@@ -2167,6 +2182,8 @@ func (cs *State) addVoteCheckPrevVote(vote *types.Vote, peerID p2p.ID) (ok bool,
 	return true, added, err
 }
 
+// This is verified by whether VoteExtension is enabled or not.
+// If VoteExtension is disabled, extension data shouldn't be added to the vote.
 func (cs *State) addVoteVerifyExtensionVote(vote *types.Vote, peerID p2p.ID) (ok bool, extEnabled bool, err error) {
 	// Check to see if the chain is configured to extend votes.
 	extEnabled = cs.state.ConsensusParams.ABCI.VoteExtensionsEnabled(vote.Height)
@@ -2240,6 +2257,9 @@ func (cs *State) addVote(vote *types.Vote, peerID p2p.ID, extEnabled bool) (ok b
 	return true, added, err
 }
 
+// It handles the case of a prevote being a vote.
+// It further handles LockedBlock and ValidBlock in the event of a +2/3 majority.
+// It also handles progress to various steps depending on the situation.
 func (cs *State) addVoteProcessPrevote(vote *types.Vote, height int64) (ok bool, err error) {
 	if vote.Type != cmtproto.PrevoteType {
 		err = fmt.Errorf("only prevote type vote can be processed")
@@ -2327,6 +2347,9 @@ func (cs *State) addVoteProcessPrevote(vote *types.Vote, height int64) (ok bool,
 	return true, err
 }
 
+// Handles the case of a vote on precommit.
+// Unlike addVoteProcessPrevote, it only handles the progression
+// to the various steps for each situation.
 func (cs *State) addVoteProcessPrecommit(vote *types.Vote, height int64) (ok bool, err error) {
 	if vote.Type != cmtproto.PrecommitType {
 		err = fmt.Errorf("only precommit type vote can be processed")
