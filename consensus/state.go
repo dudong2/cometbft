@@ -32,6 +32,18 @@ import (
 
 var msgQueueSize = 1000
 
+type PrevoteMajType uint8
+
+// precommit majority type for precommit voting
+const (
+	PrevoteMajTypeFail          = PrevoteMajType(0x00)
+	PrevoteMajTypeNilBlock      = PrevoteMajType(0x01)
+	PrevoteMajTypeLockedBlock   = PrevoteMajType(0x02)
+	PrevoteMajTypeProposalBlock = PrevoteMajType(0x03)
+	PrevoteMajTypeUnknownBlock  = PrevoteMajType(0x04)
+	PrevoteMajTypeUndefined     = PrevoteMajType(0x05)
+)
+
 // msgs from the reactor which may update the state
 type msgInfo struct {
 	Msg    Message `json:"msg"`
@@ -313,7 +325,6 @@ func (cs *State) OnStart() error {
 
 	LOOP:
 		for {
-
 			err = cs.catchupReplay(cs.Height)
 			switch {
 			case err == nil:
@@ -1395,8 +1406,20 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 	// check for a polka
 	blockID, ok := cs.Votes.Prevotes(round).TwoThirdsMajority()
 
-	// If we don't have a polka, we must precommit nil.
+	prevoteMajType := PrevoteMajTypeUndefined
 	if !ok {
+		prevoteMajType = PrevoteMajTypeFail
+	} else if len(blockID.Hash) == 0 {
+		prevoteMajType = PrevoteMajTypeNilBlock
+	} else if cs.LockedBlock.HashesTo(blockID.Hash) {
+		prevoteMajType = PrevoteMajTypeLockedBlock
+	} else if cs.ProposalBlock.HashesTo(blockID.Hash) {
+		prevoteMajType = PrevoteMajTypeProposalBlock
+	} else {
+		prevoteMajType = PrevoteMajTypeUnknownBlock
+	}
+
+	if prevoteMajType == PrevoteMajTypeFail {
 		if cs.LockedBlock != nil {
 			logger.Debug("precommit step; no +2/3 prevotes during enterPrecommit while we are locked; precommitting nil")
 		} else {
@@ -1407,19 +1430,16 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 		return
 	}
 
-	// At this point +2/3 prevoted for a particular block or nil.
-	if err := cs.eventBus.PublishEventPolka(cs.RoundStateEvent()); err != nil {
-		logger.Error("failed publishing polka", "err", err)
-	}
-
 	// the latest POLRound should be this round.
 	polRound, _ := cs.Votes.POLInfo()
 	if polRound < round {
 		panic(fmt.Sprintf("this POLRound should be %v but got %v", round, polRound))
 	}
 
-	// +2/3 prevoted nil. Unlock and precommit nil.
-	if len(blockID.Hash) == 0 {
+	switch prevoteMajType {
+	case PrevoteMajTypeFail:
+		// already processed for nil vote
+	case PrevoteMajTypeNilBlock:
 		if cs.LockedBlock == nil {
 			logger.Debug("precommit step; +2/3 prevoted for nil")
 		} else {
@@ -1434,13 +1454,8 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 		}
 
 		cs.signAddVote(cmtproto.PrecommitType, nil, types.PartSetHeader{})
-		return
-	}
 
-	// At this point, +2/3 prevoted for a particular block.
-
-	// If we're already locked on that block, precommit it, and update the LockedRound
-	if cs.LockedBlock.HashesTo(blockID.Hash) {
+	case PrevoteMajTypeLockedBlock:
 		logger.Debug("precommit step; +2/3 prevoted locked block; relocking")
 		cs.LockedRound = round
 
@@ -1449,11 +1464,8 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 		}
 
 		cs.signAddVote(cmtproto.PrecommitType, blockID.Hash, blockID.PartSetHeader)
-		return
-	}
 
-	// If +2/3 prevoted for proposal block, stage and precommit it
-	if cs.ProposalBlock.HashesTo(blockID.Hash) {
+	case PrevoteMajTypeProposalBlock:
 		logger.Debug("precommit step; +2/3 prevoted proposal block; locking", "hash", blockID.Hash)
 
 		// Validate the block.
@@ -1470,28 +1482,36 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 		}
 
 		cs.signAddVote(cmtproto.PrecommitType, blockID.Hash, blockID.PartSetHeader)
-		return
+
+	case PrevoteMajTypeUnknownBlock:
+		// There was a polka in this round for a block we don't have.
+		// Fetch that block, unlock, and precommit nil.
+		// The +2/3 prevotes for this round is the POL for our unlock.
+		logger.Debug("precommit step; +2/3 prevotes for a block we do not have; voting nil", "block_id", blockID)
+
+		cs.LockedRound = -1
+		cs.LockedBlock = nil
+		cs.LockedBlockParts = nil
+
+		if !cs.ProposalBlockParts.HasHeader(blockID.PartSetHeader) {
+			cs.ProposalBlock = nil
+			cs.ProposalBlockParts = types.NewPartSetFromHeader(blockID.PartSetHeader)
+		}
+
+		if err := cs.eventBus.PublishEventUnlock(cs.RoundStateEvent()); err != nil {
+			logger.Error("failed publishing event unlock", "err", err)
+		}
+
+		cs.signAddVote(cmtproto.PrecommitType, nil, types.PartSetHeader{})
+
+	case PrevoteMajTypeUndefined:
+		logger.Debug("prevote majority type is undefined; ignore voting.")
 	}
 
-	// There was a polka in this round for a block we don't have.
-	// Fetch that block, unlock, and precommit nil.
-	// The +2/3 prevotes for this round is the POL for our unlock.
-	logger.Debug("precommit step; +2/3 prevotes for a block we do not have; voting nil", "block_id", blockID)
-
-	cs.LockedRound = -1
-	cs.LockedBlock = nil
-	cs.LockedBlockParts = nil
-
-	if !cs.ProposalBlockParts.HasHeader(blockID.PartSetHeader) {
-		cs.ProposalBlock = nil
-		cs.ProposalBlockParts = types.NewPartSetFromHeader(blockID.PartSetHeader)
+	// At this point +2/3 prevoted for a particular block or nil.
+	if err := cs.eventBus.PublishEventPolka(cs.RoundStateEvent()); err != nil {
+		logger.Error("failed publishing polka", "err", err)
 	}
-
-	if err := cs.eventBus.PublishEventUnlock(cs.RoundStateEvent()); err != nil {
-		logger.Error("failed publishing event unlock", "err", err)
-	}
-
-	cs.signAddVote(cmtproto.PrecommitType, nil, types.PartSetHeader{})
 }
 
 // Enter: any +2/3 precommits for next round.
