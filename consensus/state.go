@@ -182,10 +182,10 @@ func NewState(
 
 	// We have no votes, so reconstruct LastCommit from SeenCommit.
 	if state.LastBlockHeight > 0 {
-		cs.reconstructLastCommit(state)
+		cs.reconstructLastCommit(state) // !! last commit(last precommit voteset)을 재구축
 	}
 
-	cs.updateToState(state)
+	cs.updateToState(state) // !! latest commited block으로 update
 
 	// NOTE: we do not call scheduleRound0 yet, we do that upon Start()
 
@@ -299,13 +299,13 @@ func (cs *State) LoadCommit(height int64) *types.Commit {
 
 // OnStart loads the latest state via the WAL, and starts the timeout and
 // receive routines.
-func (cs *State) OnStart() error {
+func (cs *State) OnStart() error { // !! 서비스 시작할 때 수행됨
 	var err error
 
 	// We may set the WAL in testing before calling Start, so only OpenWAL if its
 	// still the nilWAL.
 	if _, ok := cs.wal.(nilWAL); ok {
-		if cs.wal, err = loadWalFile(cs.config.WalFile(), cs.Logger); err != nil {
+		if cs.wal, err = loadWalFile(cs.config.WalFile(), cs.Logger); err != nil { // !! WAL 파일 로드하고
 			return err
 		}
 	}
@@ -315,7 +315,7 @@ func (cs *State) OnStart() error {
 	// NOTE: we will get a build up of garbage go routines
 	// firing on the tockChan until the receiveRoutine is started
 	// to deal with them (by that point, at most one will be valid)
-	if err = cs.timeoutTicker.Start(); err != nil {
+	if err = cs.timeoutTicker.Start(); err != nil { // !! timeout을 처리하기 위한 timeout routine 실행
 		return err
 	}
 
@@ -326,7 +326,7 @@ func (cs *State) OnStart() error {
 
 	LOOP:
 		for {
-			err = cs.catchupReplay(cs.Height)
+			err = cs.catchupReplay(cs.Height) // !! WAL파일로부터 복구 시도
 			switch {
 			case err == nil:
 				break LOOP
@@ -339,7 +339,7 @@ func (cs *State) OnStart() error {
 				return err
 			}
 
-			cs.Logger.Error("the WAL file is corrupted; attempting repair", "err", err)
+			cs.Logger.Error("the WAL file is corrupted; attempting repair", "err", err) // !! 손상된 WAL 복구 시도
 
 			// 1) prep work
 			if err = cs.wal.Stop(); err != nil {
@@ -376,16 +376,16 @@ func (cs *State) OnStart() error {
 	}
 
 	// Double Signing Risk Reduction
-	if err = cs.checkDoubleSigningRisk(cs.Height); err != nil {
+	if err = cs.checkDoubleSigningRisk(cs.Height); err != nil { // !! 이중 서명에 대한 가능성 체크
 		return err
 	}
 
 	// now start the receiveRoutine
-	go cs.receiveRoutine(0)
+	go cs.receiveRoutine(0) // !! 메인 루틴 수행(0을 넘기므로 영원히 수행됨)
 
 	// schedule the first round!
 	// use GetRoundState so we don't race the receiveRoutine for access
-	cs.scheduleRound0(cs.GetRoundState())
+	cs.scheduleRound0(cs.GetRoundState()) // !! timeout 스케쥴링
 
 	return nil
 }
@@ -547,7 +547,7 @@ func (cs *State) reconstructLastCommit(state sm.State) {
 		return
 	}
 
-	votes, err := cs.votesFromSeenCommit(state)
+	votes, err := cs.votesFromSeenCommit(state) // !! latest commited block에서 voteset을 가져옴
 	if err != nil {
 		panic(fmt.Sprintf("failed to reconstruct last commit; %s", err))
 	}
@@ -591,17 +591,17 @@ func (cs *State) votesFromSeenCommit(state sm.State) (*types.VoteSet, error) {
 
 // Updates State and increments height to match that of state.
 // The round becomes 0 and cs.Step becomes cstypes.RoundStepNewHeight.
-func (cs *State) updateToState(state sm.State) {
-	if cs.CommitRound > -1 && 0 < cs.Height && cs.Height != state.LastBlockHeight {
+func (cs *State) updateToState(state sm.State) { // !! arg로 넘어오는 state는 finalizeCommit을 할 당시의 state이므로 목표 height는 state.LastBlockHeight+1이다.
+	if cs.CommitRound > -1 && 0 < cs.Height && cs.Height != state.LastBlockHeight { // !! 셋팅할 height 체크
 		panic(fmt.Sprintf(
 			"updateToState() expected state height of %v but found %v",
 			cs.Height, state.LastBlockHeight,
 		))
 	}
 
-	if !cs.state.IsEmpty() {
-		if cs.state.LastBlockHeight > 0 {
-			if cs.state.LastBlockHeight+1 != cs.Height {
+	if !cs.state.IsEmpty() { // !! latest committed block의 validators가 비어있지 않음
+		if cs.state.LastBlockHeight > 0 { // !! genesis가 아님
+			if cs.state.LastBlockHeight+1 != cs.Height { // !! latest committed block의 last block height는 현재 height와 같아야 함
 				// This might happen when someone else is mutating cs.state.
 				// Someone forgot to pass in state.Copy() somewhere?!
 				panic(fmt.Sprintf(
@@ -610,7 +610,7 @@ func (cs *State) updateToState(state sm.State) {
 				))
 			}
 
-			if cs.Height == cs.state.InitialHeight {
+			if cs.Height == cs.state.InitialHeight { // !! 현재 height는 initial height면 안됨
 				panic(fmt.Sprintf(
 					"inconsistent cs.state.LastBlockHeight %v, expected 0 for initial height %v",
 					cs.state.LastBlockHeight, cs.state.InitialHeight,
@@ -623,7 +623,7 @@ func (cs *State) updateToState(state sm.State) {
 		// We don't want to reset e.g. the Votes, but we still want to
 		// signal the new round step, because other services (eg. txNotifier)
 		// depend on having an up-to-date peer state!
-		if state.LastBlockHeight <= cs.state.LastBlockHeight {
+		if state.LastBlockHeight <= cs.state.LastBlockHeight { // !! 과거의 state로 update하려고 하면 무시
 			cs.Logger.Debug(
 				"ignoring updateToState()",
 				"new_height", state.LastBlockHeight+1,
@@ -638,21 +638,21 @@ func (cs *State) updateToState(state sm.State) {
 	validators := state.Validators
 
 	switch {
-	case state.LastBlockHeight == 0: // Very first commit should be empty.
+	case state.LastBlockHeight == 0: // Very first commit should be empty. // !! genesis는 합의를 진행하지 않았으므로 last commit은 nil
 		cs.LastCommit = (*types.VoteSet)(nil)
 
-	case cs.CommitRound > -1 && cs.Votes != nil: // Otherwise, use cs.Votes
+	case cs.CommitRound > -1 && cs.Votes != nil: // Otherwise, use cs.Votes // !! finalizeCommit에서 updateToState를 호출한 경우
 		precommitVoteSet := cs.Votes.Precommits(cs.CommitRound)
-		if !precommitVoteSet.HasTwoThirdsMajority() {
+		if !precommitVoteSet.HasTwoThirdsMajority() { // !! precommit에서 +2/3합의를 받지 못했는데 finalizeCommit을 호출했으면 안된다.
 			panic(fmt.Sprintf(
 				"wanted to form a commit, but precommits (H/R: %d/%d) didn't have 2/3+: %v",
 				state.LastBlockHeight, cs.CommitRound, cs.Votes.Precommits(cs.CommitRound),
 			))
 		}
 
-		cs.LastCommit = precommitVoteSet
+		cs.LastCommit = precommitVoteSet // !! last commit은 precommit voteset
 
-	case cs.LastCommit == nil:
+	case cs.LastCommit == nil: // !! genesis가 아닌데 last commit이 nil일 수는 없다.
 		// NOTE: when consensus starts, it has no votes. reconstructLastCommit
 		// must be called to reconstruct LastCommit from SeenCommit.
 		panic(fmt.Sprintf(
@@ -662,16 +662,16 @@ func (cs *State) updateToState(state sm.State) {
 	}
 
 	// Next desired block height
-	height := state.LastBlockHeight + 1
+	height := state.LastBlockHeight + 1 // !! spread logic
 	if height == 1 {
 		height = state.InitialHeight
 	}
 
 	// RoundState fields
 	cs.updateHeight(height)
-	cs.updateRoundAndStep(0, cstypes.RoundStepNewHeight)
+	cs.updateRoundAndStep(0, cstypes.RoundStepNewHeight) // !! height, round, step을 각각 height, 0, new height로 설정
 
-	if cs.CommitTime.IsZero() {
+	if cs.CommitTime.IsZero() { // !! genesis block에서는 commit time이 비어있다.
 		// "Now" makes it easier to sync up dev nodes.
 		// We add timeoutCommit to allow transactions
 		// to be gathered for the first block.
@@ -776,10 +776,10 @@ func (cs *State) receiveRoutine(maxSteps int) {
 		var mi msgInfo
 
 		select {
-		case <-cs.txNotifier.TxsAvailable():
+		case <-cs.txNotifier.TxsAvailable(): // !! tx가 mempool에 추가되었는지?
 			cs.handleTxsAvailable()
 
-		case mi = <-cs.peerMsgQueue:
+		case mi = <-cs.peerMsgQueue: // !! peer msg 처리
 			if err := cs.wal.Write(mi); err != nil {
 				cs.Logger.Error("failed writing to WAL", "err", err)
 			}
@@ -787,7 +787,7 @@ func (cs *State) receiveRoutine(maxSteps int) {
 			// may generate internal events (votes, complete proposals, 2/3 majorities)
 			cs.handleMsg(mi)
 
-		case mi = <-cs.internalMsgQueue:
+		case mi = <-cs.internalMsgQueue: // !! internal msg 처리
 			err := cs.wal.WriteSync(mi) // NOTE: fsync
 			if err != nil {
 				panic(fmt.Sprintf(
@@ -807,7 +807,7 @@ func (cs *State) receiveRoutine(maxSteps int) {
 			// handles proposals, block parts, votes
 			cs.handleMsg(mi)
 
-		case ti := <-cs.timeoutTicker.Chan(): // tockChan:
+		case ti := <-cs.timeoutTicker.Chan(): // tockChan: // !! timeout 관리
 			if err := cs.wal.Write(ti); err != nil {
 				cs.Logger.Error("failed writing to WAL", "err", err)
 			}
@@ -824,7 +824,7 @@ func (cs *State) receiveRoutine(maxSteps int) {
 }
 
 // state transitions on complete-proposal, 2/3-any, 2/3-one
-func (cs *State) handleMsg(mi msgInfo) {
+func (cs *State) handleMsg(mi msgInfo) { // !! peer msg, internal msg 처리
 	cs.mtx.Lock()
 	defer cs.mtx.Unlock()
 	var (
@@ -838,11 +838,11 @@ func (cs *State) handleMsg(mi msgInfo) {
 	case *ProposalMessage:
 		// will not cause transition.
 		// once proposal is set, we can receive block parts
-		err = cs.setProposal(msg.Proposal)
+		err = cs.setProposal(msg.Proposal) // !! proposal 셋팅
 
 	case *BlockPartMessage:
 		// if the proposal is complete, we'll enterPrevote or tryFinalizeCommit
-		added, err = cs.addProposalBlockPart(msg, peerID)
+		added, err = cs.addProposalBlockPart(msg, peerID) // !! proposal block part 추가
 
 		// We unlock here to yield to any routines that need to read the the RoundState.
 		// Previously, this code held the lock from the point at which the final block
@@ -860,7 +860,7 @@ func (cs *State) handleMsg(mi msgInfo) {
 		cs.mtx.Lock()
 		if added {
 			if cs.ProposalBlockParts.IsComplete() {
-				cs.handleCompleteProposal(msg.Height)
+				cs.handleCompleteProposal(msg.Height) // !! proposal block parrts가 모두 모임
 			}
 
 			cs.statsMsgQueue <- mi
@@ -879,7 +879,7 @@ func (cs *State) handleMsg(mi msgInfo) {
 	case *VoteMessage:
 		// attempt to add the vote and dupeout the validator if its a duplicate signature
 		// if the vote gives us a 2/3-any or 2/3-one, we transition
-		added, err = cs.processAddVote(msg.Vote, peerID)
+		added, err = cs.processAddVote(msg.Vote, peerID) // !! vote 추가 진행
 		if added {
 			cs.statsMsgQueue <- mi
 		}
@@ -916,11 +916,11 @@ func (cs *State) handleMsg(mi msgInfo) {
 	}
 }
 
-func (cs *State) handleTimeout(ti timeoutInfo, rs cstypes.RoundState) {
+func (cs *State) handleTimeout(ti timeoutInfo, rs cstypes.RoundState) { // !! rs -> 현재 round state
 	cs.Logger.Debug("received tock", "timeout", ti.Duration, "height", ti.Height, "round", ti.Round, "step", ti.Step)
 
 	// timeouts must be for current height, round, step
-	if ti.Height != rs.Height || ti.Round < rs.Round || (ti.Round == rs.Round && ti.Step < rs.Step) {
+	if ti.Height != rs.Height || ti.Round < rs.Round || (ti.Round == rs.Round && ti.Step < rs.Step) { // !! height가 다르거나 과거의 round, step으로 timeout을 하면 안됨
 		cs.Logger.Debug("ignoring tock because we are ahead", "height", rs.Height, "round", rs.Round, "step", rs.Step)
 		return
 	}
@@ -952,13 +952,13 @@ func (cs *State) handleTimeout(ti timeoutInfo, rs cstypes.RoundState) {
 
 		cs.enterPrecommit(ti.Height, ti.Round)
 
-	case cstypes.RoundStepPrecommitWait:
+	case cstypes.RoundStepPrecommitWait: // !! non-intuitive code flow
 		if err := cs.eventBus.PublishEventTimeoutWait(cs.RoundStateEvent()); err != nil {
 			cs.Logger.Error("failed publishing timeout wait", "err", err)
 		}
 
-		cs.enterPrecommit(ti.Height, ti.Round)
-		cs.enterNewRound(ti.Height, ti.Round+1)
+		cs.enterPrecommit(ti.Height, ti.Round)  // !! 이 조건에서는 바로 return 된다 -> 아마 의미 없는 코드...?
+		cs.enterNewRound(ti.Height, ti.Round+1) // !! nil block에 대한 +2/3합의가 일어난 상황에서 들어오므로 다음 round로 진행
 
 	default:
 		panic(fmt.Sprintf("invalid timeout step: %v", ti.Step))
@@ -976,7 +976,7 @@ func (cs *State) handleTxsAvailable() {
 
 	switch cs.Step {
 	case cstypes.RoundStepNewHeight: // timeoutCommit phase
-		if cs.needProofBlock(cs.Height) {
+		if cs.needProofBlock(cs.Height) { // !! app hash의 변경이 일어난 경우 NewRound를 거쳐 Propose로 진입
 			// enterPropose will be called by enterNewRound
 			return
 		}
@@ -1002,7 +1002,7 @@ func (cs *State) handleTxsAvailable() {
 // Enter: +2/3 precommits for nil at (height,round-1)
 // Enter: +2/3 prevotes any or +2/3 precommits for block or any from (height, round)
 // NOTE: cs.StartTime was already set for height.
-func (cs *State) enterNewRound(height int64, round int32) {
+func (cs *State) enterNewRound(height int64, round int32) { // !! 이후 propose step 돌입
 	logger := cs.Logger.With("height", height, "round", round)
 
 	if cs.Height != height || round < cs.Round || (cs.Round == round && cs.Step != cstypes.RoundStepNewHeight) {
@@ -1021,7 +1021,7 @@ func (cs *State) enterNewRound(height int64, round int32) {
 
 	// increment validators if necessary
 	validators := cs.Validators
-	if cs.Round < round {
+	if cs.Round < round { // !! round가 증가하면 validator priority 증가
 		validators = validators.Copy()
 		validators.IncrementProposerPriority(cmtmath.SafeSubInt32(round, cs.Round))
 	}
@@ -1033,7 +1033,7 @@ func (cs *State) enterNewRound(height int64, round int32) {
 	cs.Validators = validators
 	// If round == 0, we've already reset these upon new height, and meanwhile
 	// we might have received a proposal for round 0.
-	if round != 0 {
+	if round != 0 { // !! round가 0일때는 new height step에서 reset을 이미 했다.
 		logger.Debug("resetting proposal info")
 		cs.Proposal = nil
 		cs.ProposalBlock = nil
@@ -1051,18 +1051,18 @@ func (cs *State) enterNewRound(height int64, round int32) {
 	// we may need an empty "proof" block, and enterPropose immediately.
 	waitForTxs := cs.config.WaitForTxs() && round == 0 && !cs.needProofBlock(height)
 	if waitForTxs {
-		if cs.config.CreateEmptyBlocksInterval > 0 {
+		if cs.config.CreateEmptyBlocksInterval > 0 { // !! interval만큼 timeout 시키고 handleTimeout에서 Propose로 진입
 			cs.scheduleTimeout(cs.config.CreateEmptyBlocksInterval, height, round,
 				cstypes.RoundStepNewRound)
 		}
 	} else {
-		cs.enterPropose(height, round)
+		cs.enterPropose(height, round) // !! txs를 기다릴 필요가 없으니 바로 Propose로 진입
 	}
 }
 
 // needProofBlock returns true on the first height (so the genesis app hash is signed right away)
 // and where the last block (height-1) caused the app hash to change
-func (cs *State) needProofBlock(height int64) bool {
+func (cs *State) needProofBlock(height int64) bool { // !! 이전 블록의 app hash와 달라졌는지 여부
 	if height == cs.state.InitialHeight {
 		return true
 	}
@@ -1110,7 +1110,7 @@ func (cs *State) enterPropose(height int64, round int32) {
 	}()
 
 	// If we don't get the proposal and all block parts quick enough, enterPrevote
-	cs.scheduleTimeout(cs.config.Propose(round), height, round, cstypes.RoundStepPropose)
+	cs.scheduleTimeout(cs.config.Propose(round), height, round, cstypes.RoundStepPropose) // !! 만약 proposal complete라서 이미 prevote로 진행이 되었다면 이후 handleTimeout에서 timeout을 처리하게 되더라도 enterPrevote에서 바로 리턴됨
 
 	// Nothing more to do if we're not a validator
 	if cs.privValidator == nil {
@@ -1137,7 +1137,7 @@ func (cs *State) enterPropose(height int64, round int32) {
 
 	if cs.isProposer(address) {
 		logger.Debug("propose step; our turn to propose", "proposer", address)
-		cs.decideProposal(height, round)
+		cs.decideProposal(height, round) // !! proposal block을 결정하고 전파
 	} else {
 		logger.Debug("propose step; not our turn to propose", "proposer", cs.Validators.GetProposer().Address)
 	}
@@ -1152,13 +1152,13 @@ func (cs *State) defaultDecideProposal(height int64, round int32) {
 	var blockParts *types.PartSet
 
 	// Decide on block
-	if cs.ValidBlock != nil {
+	if cs.ValidBlock != nil { // !! valid block이 있으면 해당 block 선택
 		// If there is valid block, choose that.
 		block, blockParts = cs.ValidBlock, cs.ValidBlockParts
-	} else {
+	} else { // !! valid block이 없는 경우
 		// Create a new proposal block from state/txs from the mempool.
 		var err error
-		block, err = cs.createProposalBlock(context.TODO())
+		block, err = cs.createProposalBlock(context.TODO()) // !! proposal block 생성
 		if err != nil {
 			cs.Logger.Error("unable to create proposal block", "error", err)
 			return
@@ -1166,7 +1166,7 @@ func (cs *State) defaultDecideProposal(height int64, round int32) {
 			panic("Method createProposalBlock should not provide a nil block without errors")
 		}
 		cs.metrics.ProposalCreateCount.Add(1)
-		blockParts, err = block.MakePartSet(types.BlockPartSizeBytes)
+		blockParts, err = block.MakePartSet(types.BlockPartSizeBytes) // !! 생성된 proposal block에 대한 block parts 생성
 		if err != nil {
 			cs.Logger.Error("unable to create proposal block part set", "error", err)
 			return
@@ -1181,17 +1181,17 @@ func (cs *State) defaultDecideProposal(height int64, round int32) {
 
 	// Make proposal
 	propBlockID := types.BlockID{Hash: block.Hash(), PartSetHeader: blockParts.Header()}
-	proposal := types.NewProposal(height, round, cs.ValidRound, propBlockID)
+	proposal := types.NewProposal(height, round, cs.ValidRound, propBlockID) // !! proposal 생성(block이 아닌 block id가 들어감) -> block의 전파 대신 block parts를 전파
 	p := proposal.ToProto()
-	if err := cs.privValidator.SignProposal(cs.state.ChainID, p); err == nil {
+	if err := cs.privValidator.SignProposal(cs.state.ChainID, p); err == nil { // !! proposal에 서명
 		proposal.Signature = p.Signature
 
 		// send proposal and block parts on internal msg queue
-		cs.sendInternalMessage(msgInfo{&ProposalMessage{proposal}, ""})
+		cs.sendInternalMessage(msgInfo{&ProposalMessage{proposal}, ""}) // !! proposal message 전파
 
 		for i := 0; i < int(blockParts.Total()); i++ {
 			part := blockParts.GetPart(i)
-			cs.sendInternalMessage(msgInfo{&BlockPartMessage{cs.Height, cs.Round, part}, ""})
+			cs.sendInternalMessage(msgInfo{&BlockPartMessage{cs.Height, cs.Round, part}, ""}) // !! block part message 전파
 		}
 
 		cs.Logger.Debug("signed proposal", "height", height, "round", round, "proposal", proposal)
@@ -1203,16 +1203,16 @@ func (cs *State) defaultDecideProposal(height int64, round int32) {
 // Returns true if the proposal block is complete &&
 // (if POLRound was proposed, we have +2/3 prevotes from there).
 func (cs *State) isProposalComplete() bool {
-	if cs.Proposal == nil || cs.ProposalBlock == nil {
+	if cs.Proposal == nil || cs.ProposalBlock == nil { // !! cs.Proposal은 proposal message를 받아 셋팅됨, cs.ProposalBlock은 POL 혹은 block parts를 모두 모든 상태에서 셋팅됨
 		return false
 	}
 	// we have the proposal. if there's a POLRound,
 	// make sure we have the prevotes from it too
-	if cs.Proposal.POLRound < 0 {
+	if cs.Proposal.POLRound < 0 { // !! POL round가 셋팅되지 않았으면 proposal block에 대해 합의할 것이므로 true를 리턴
 		return true
 	}
 	// if this is false the proposer is lying or we haven't received the POL yet
-	return cs.Votes.Prevotes(cs.Proposal.POLRound).HasTwoThirdsMajority()
+	return cs.Votes.Prevotes(cs.Proposal.POLRound).HasTwoThirdsMajority() // !! POL round의 prevote에서는 +2/3의 투표를 받음 -> false면 누군가 거짓말을 하고 있는거다
 }
 
 // Create the next block to propose and return it. Returns nil block upon error.
@@ -1237,7 +1237,7 @@ func (cs *State) createProposalBlock(ctx context.Context) (*types.Block, error) 
 
 	case cs.LastCommit.HasTwoThirdsMajority():
 		// Make the commit from LastCommit
-		lastExtCommit = cs.LastCommit.MakeExtendedCommit(cs.state.ConsensusParams.ABCI)
+		lastExtCommit = cs.LastCommit.MakeExtendedCommit(cs.state.ConsensusParams.ABCI) // !! extended commit 생성
 
 	default: // This shouldn't happen.
 		return nil, errors.New("propose step; cannot propose anything without commit for the previous block")
@@ -1251,7 +1251,7 @@ func (cs *State) createProposalBlock(ctx context.Context) (*types.Block, error) 
 
 	proposerAddr := cs.privValidatorPubKey.Address()
 
-	ret, err := cs.blockExec.CreateProposalBlock(ctx, cs.Height, cs.state, lastExtCommit, proposerAddr)
+	ret, err := cs.blockExec.CreateProposalBlock(ctx, cs.Height, cs.state, lastExtCommit, proposerAddr) // !! proposal block 생성
 	if err != nil {
 		panic(err)
 	}
@@ -1282,7 +1282,7 @@ func (cs *State) enterPrevote(height int64, round int32) {
 	logger.Debug("entering prevote step", "current", log.NewLazySprintf("%v/%v/%v", cs.Height, cs.Round, cs.Step))
 
 	// Sign and broadcast vote as necessary
-	cs.doPrevote(height, round)
+	cs.doPrevote(height, round) // !! prevote 수행
 
 	// Once `addVote` hits any +2/3 prevotes, we will go to PrevoteWait
 	// (so we have more time to try and collect +2/3 prevotes for a single block)
@@ -1292,21 +1292,21 @@ func (cs *State) defaultDoPrevote(height int64, round int32) {
 	logger := cs.Logger.With("height", height, "round", round)
 
 	// If a block is locked, prevote that.
-	if cs.LockedBlock != nil {
+	if cs.LockedBlock != nil { // !! LockedBlock이 있으면 LockedBlock에 투표
 		logger.Debug("prevote step; already locked on a block; prevoting locked block")
 		cs.signAddVote(cmtproto.PrevoteType, cs.LockedBlock.Hash(), cs.LockedBlockParts.Header())
 		return
 	}
 
 	// If ProposalBlock is nil, prevote nil.
-	if cs.ProposalBlock == nil {
+	if cs.ProposalBlock == nil { // !! ProposalBlock이 없다면 nil투표
 		logger.Debug("prevote step: ProposalBlock is nil")
 		cs.signAddVote(cmtproto.PrevoteType, nil, types.PartSetHeader{})
 		return
 	}
 
 	// Validate proposal block, from consensus' perspective
-	err := cs.blockExec.ValidateBlock(cs.state, cs.ProposalBlock)
+	err := cs.blockExec.ValidateBlock(cs.state, cs.ProposalBlock) // !! block이 invalid하다면 nil투표
 	if err != nil {
 		// ProposalBlock is invalid, prevote nil.
 		logger.Error("prevote step: consensus deems this block invalid; prevoting nil",
@@ -1325,7 +1325,7 @@ func (cs *State) defaultDoPrevote(height int64, round int32) {
 		Please see `PrepareProosal`-`ProcessProposal` coherence and determinism properties
 		in the ABCI++ specification.
 	*/
-	isAppValid, err := cs.blockExec.ProcessProposal(cs.ProposalBlock, cs.state)
+	isAppValid, err := cs.blockExec.ProcessProposal(cs.ProposalBlock, cs.state) // !! ABCI++(prevote과정에 proposal을 처리 가능)
 	if err != nil {
 		panic(fmt.Sprintf(
 			"state machine returned an error (%v) when calling ProcessProposal", err,
@@ -1334,7 +1334,7 @@ func (cs *State) defaultDoPrevote(height int64, round int32) {
 	cs.metrics.MarkProposalProcessed(isAppValid)
 
 	// Vote nil if the Application rejected the block
-	if !isAppValid {
+	if !isAppValid { // !! proposal의 처리가 invalid면 nil 투표
 		logger.Error("prevote step: state machine rejected a proposed block; this should not happen:"+
 			"the proposer may be misbehaving; prevoting nil", "err", err)
 		cs.signAddVote(cmtproto.PrevoteType, nil, types.PartSetHeader{})
@@ -1345,7 +1345,7 @@ func (cs *State) defaultDoPrevote(height int64, round int32) {
 	// NOTE: the proposal signature is validated when it is received,
 	// and the proposal block parts are validated as they are received (against the merkle hash in the proposal)
 	logger.Debug("prevote step: ProposalBlock is valid")
-	cs.signAddVote(cmtproto.PrevoteType, cs.ProposalBlock.Hash(), cs.ProposalBlockParts.Header())
+	cs.signAddVote(cmtproto.PrevoteType, cs.ProposalBlock.Hash(), cs.ProposalBlockParts.Header()) // !! proposal block에 투표
 }
 
 // Enter: any +2/3 prevotes at next round.
@@ -1360,7 +1360,7 @@ func (cs *State) enterPrevoteWait(height int64, round int32) {
 		return
 	}
 
-	if !cs.Votes.Prevotes(round).HasTwoThirdsAny() {
+	if !cs.Votes.Prevotes(round).HasTwoThirdsAny() { // !! prevote에서 +2/3의 투표를 받았어야 함
 		panic(fmt.Sprintf(
 			"entering prevote wait step (%v/%v), but prevotes does not have any +2/3 votes",
 			height, round,
@@ -1376,7 +1376,7 @@ func (cs *State) enterPrevoteWait(height int64, round int32) {
 	}()
 
 	// Wait for some more prevotes; enterPrecommit
-	cs.scheduleTimeout(cs.config.Prevote(round), height, round, cstypes.RoundStepPrevoteWait)
+	cs.scheduleTimeout(cs.config.Prevote(round), height, round, cstypes.RoundStepPrevoteWait) // !! prevote delta만큼 timeout을 스케쥴링
 }
 
 // Enter: `timeoutPrevote` after any +2/3 prevotes.
@@ -1429,12 +1429,12 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 			logger.Debug("precommit step; no +2/3 prevotes during enterPrecommit; precommitting nil")
 		}
 
-		cs.signAddVote(cmtproto.PrecommitType, nil, types.PartSetHeader{})
+		cs.signAddVote(cmtproto.PrecommitType, nil, types.PartSetHeader{}) // !! nil 투표
 		return
 	}
 
 	// the latest POLRound should be this round.
-	polRound, _ := cs.Votes.POLInfo()
+	polRound, _ := cs.Votes.POLInfo() // !! 가장 최근 prevote에서 +2/3의 합의를 받은 round
 	if polRound < round {
 		panic(fmt.Sprintf("this POLRound should be %v but got %v", round, polRound))
 	}
@@ -1458,19 +1458,19 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 			}
 		}
 
-		cs.signAddVote(cmtproto.PrecommitType, nil, types.PartSetHeader{})
+		cs.signAddVote(cmtproto.PrecommitType, nil, types.PartSetHeader{}) // !! nil 투표
 
 	// If the prevote receives a +2/3 majority for the locked block,
 	// update the locked round and vote on that block.
 	case PrevoteMajTypeLockedBlock:
 		logger.Debug("precommit step; +2/3 prevoted locked block; relocking")
-		cs.LockedRound = round
+		cs.LockedRound = round // !! locked round update
 
 		if err := cs.eventBus.PublishEventRelock(cs.RoundStateEvent()); err != nil {
 			logger.Error("failed publishing event relock", "err", err)
 		}
 
-		cs.signAddVote(cmtproto.PrecommitType, blockID.Hash, blockID.PartSetHeader)
+		cs.signAddVote(cmtproto.PrecommitType, blockID.Hash, blockID.PartSetHeader) // !! 투표
 
 	// If the prevote receives a +2/3 majority for a proposal block that is
 	// different from the locked block, it means that a POLC(proof-of-lock-change)
@@ -1479,19 +1479,19 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 		logger.Debug("precommit step; +2/3 prevoted proposal block; locking", "hash", blockID.Hash)
 
 		// Validate the block.
-		if err := cs.blockExec.ValidateBlock(cs.state, cs.ProposalBlock); err != nil {
+		if err := cs.blockExec.ValidateBlock(cs.state, cs.ProposalBlock); err != nil { // !! block 검증
 			panic(fmt.Sprintf("precommit step; +2/3 prevoted for an invalid block: %v", err))
 		}
 
 		cs.LockedRound = round
-		cs.LockedBlock = cs.ProposalBlock
+		cs.LockedBlock = cs.ProposalBlock // !! locked block은 여기서만 셋팅한다
 		cs.LockedBlockParts = cs.ProposalBlockParts
 
 		if err := cs.eventBus.PublishEventLock(cs.RoundStateEvent()); err != nil {
 			logger.Error("failed publishing event lock", "err", err)
 		}
 
-		cs.signAddVote(cmtproto.PrecommitType, blockID.Hash, blockID.PartSetHeader)
+		cs.signAddVote(cmtproto.PrecommitType, blockID.Hash, blockID.PartSetHeader) // !! 투표
 
 	// There was a polka in this round for a block we don't have.
 	// Fetch that block, unlock, and precommit nil.
@@ -1499,7 +1499,7 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 	case PrevoteMajTypeUnknownBlock:
 		logger.Debug("precommit step; +2/3 prevotes for a block we do not have; voting nil", "block_id", blockID)
 
-		cs.LockedRound = -1
+		cs.LockedRound = -1 // !! block을 안가지고 있어서 locked block을 초기화
 		cs.LockedBlock = nil
 		cs.LockedBlockParts = nil
 
@@ -1512,7 +1512,7 @@ func (cs *State) enterPrecommit(height int64, round int32) {
 			logger.Error("failed publishing event unlock", "err", err)
 		}
 
-		cs.signAddVote(cmtproto.PrecommitType, nil, types.PartSetHeader{})
+		cs.signAddVote(cmtproto.PrecommitType, nil, types.PartSetHeader{}) // !! nil 투표
 
 	case PrevoteMajTypeUndefined:
 		logger.Debug("prevote majority type is undefined; ignore voting.")
@@ -1537,7 +1537,7 @@ func (cs *State) enterPrecommitWait(height int64, round int32) {
 		return
 	}
 
-	if !cs.Votes.Precommits(round).HasTwoThirdsAny() {
+	if !cs.Votes.Precommits(round).HasTwoThirdsAny() { // !! +2/3의 투표를 받지 않은 상태로 여기 들어오면 안된다.
 		panic(fmt.Sprintf(
 			"entering precommit wait step (%v/%v), but precommits does not have any +2/3 votes",
 			height, round,
@@ -1553,7 +1553,7 @@ func (cs *State) enterPrecommitWait(height int64, round int32) {
 	}()
 
 	// wait for some more precommits; enterNewRound
-	cs.scheduleTimeout(cs.config.Precommit(round), height, round, cstypes.RoundStepPrecommitWait)
+	cs.scheduleTimeout(cs.config.Precommit(round), height, round, cstypes.RoundStepPrecommitWait) // !! precommit delta만큼 스케쥴링
 }
 
 // Enter: +2/3 precommits for block
@@ -1575,33 +1575,33 @@ func (cs *State) enterCommit(height int64, commitRound int32) {
 		// Done enterCommit:
 		// keep cs.Round the same, commitRound points to the right Precommits set.
 		cs.updateRoundAndStep(cs.Round, cstypes.RoundStepCommit)
-		cs.CommitRound = commitRound
+		cs.CommitRound = commitRound // !! commit round, time 설정
 		cs.CommitTime = cmttime.Now()
 		cs.newStep()
 
 		// Maybe finalize immediately.
 		// We only perform the tryFinalizeCommit function if we have a block that is being committed.
 		if execTryFinalizeCommit {
-			cs.tryFinalizeCommit(height)
+			cs.tryFinalizeCommit(height) // !! commit 마무리
 		}
 	}()
 
 	blockID, ok := cs.Votes.Precommits(commitRound).TwoThirdsMajority()
-	if !ok {
+	if !ok { // !! precommit에서 +2/3의 합의를 받았어야 한다.
 		panic("RunActionCommit() expects +2/3 precommits")
 	}
 
 	// The Locked* fields no longer matter.
 	// Move them over to ProposalBlock if they match the commit hash,
 	// otherwise they'll be cleared in updateToState.
-	if cs.LockedBlock.HashesTo(blockID.Hash) {
+	if cs.LockedBlock.HashesTo(blockID.Hash) { // !! locked block, locked block part로 진행해왔지만 사실상 proposal과 다를게 없다 -> updateToState에서 초기화될 것이므로 값을 옮겨줌
 		logger.Debug("commit is for a locked block; set ProposalBlock=LockedBlock", "block_hash", blockID.Hash)
 		cs.ProposalBlock = cs.LockedBlock
 		cs.ProposalBlockParts = cs.LockedBlockParts
 	}
 
 	// If we don't have the block being committed, set up to get it.
-	if !cs.ProposalBlock.HashesTo(blockID.Hash) {
+	if !cs.ProposalBlock.HashesTo(blockID.Hash) { // !! spread logic
 		// If you don't have a commit block, we shouldn't execute finalizeCommit.
 		execTryFinalizeCommit = false
 		logger.Debug(
@@ -1610,7 +1610,7 @@ func (cs *State) enterCommit(height int64, commitRound int32) {
 			"commit_block", blockID.Hash,
 		)
 
-		if !cs.ProposalBlockParts.HasHeader(blockID.PartSetHeader) {
+		if !cs.ProposalBlockParts.HasHeader(blockID.PartSetHeader) { // !! commit하려는 block을 가지고 있지 않은 경우
 			logger.Info(
 				"commit is for a block we do not know about; set ProposalBlock=nil",
 				"proposal", log.NewLazyBlockHash(cs.ProposalBlock),
@@ -1620,7 +1620,7 @@ func (cs *State) enterCommit(height int64, commitRound int32) {
 			// We're getting the wrong block.
 			// Set up ProposalBlockParts and keep waiting.
 			cs.ProposalBlock = nil
-			cs.ProposalBlockParts = types.NewPartSetFromHeader(blockID.PartSetHeader)
+			cs.ProposalBlockParts = types.NewPartSetFromHeader(blockID.PartSetHeader) // !! 일단 proposal block parts를 셋팅한다.
 
 			if err := cs.eventBus.PublishEventValidBlock(cs.RoundStateEvent()); err != nil {
 				logger.Error("failed publishing valid block", "err", err)
@@ -1640,12 +1640,12 @@ func (cs *State) tryFinalizeCommit(height int64) {
 	}
 
 	blockID, ok := cs.Votes.Precommits(cs.CommitRound).TwoThirdsMajority()
-	if !ok || len(blockID.Hash) == 0 {
+	if !ok || len(blockID.Hash) == 0 { // !! +2/3의 합의를 받지 못했거나 nil합의가 일어난 경우 commit을 하면 안된다.
 		logger.Error("failed attempt to finalize commit; there was no +2/3 majority or +2/3 was for nil")
 		return
 	}
 
-	cs.finalizeCommit(height)
+	cs.finalizeCommit(height) // !! finalizeCommit
 }
 
 // Increment height and goto cstypes.RoundStepNewHeight
@@ -1665,17 +1665,17 @@ func (cs *State) finalizeCommit(height int64) {
 	blockID, ok := cs.Votes.Precommits(cs.CommitRound).TwoThirdsMajority()
 	block, blockParts := cs.ProposalBlock, cs.ProposalBlockParts
 
-	if !ok {
+	if !ok { // !! +2/3의 합의를 받았어야 한다.
 		panic("cannot finalize commit; commit does not have 2/3 majority")
 	}
-	if !blockParts.HasHeader(blockID.PartSetHeader) {
+	if !blockParts.HasHeader(blockID.PartSetHeader) { // !! block parts가 온전해야한다.
 		panic("expected ProposalBlockParts header to be commit header")
 	}
-	if !block.HashesTo(blockID.Hash) {
+	if !block.HashesTo(blockID.Hash) { // !! block과 block id의 hash가 일치해야한다.
 		panic("cannot finalize commit; proposal block does not hash to commit hash")
 	}
 
-	if err := cs.blockExec.ValidateBlock(cs.state, block); err != nil {
+	if err := cs.blockExec.ValidateBlock(cs.state, block); err != nil { // !! block 검증
 		panic(fmt.Errorf("+2/3 committed an invalid block: %w", err))
 	}
 
@@ -1690,7 +1690,7 @@ func (cs *State) finalizeCommit(height int64) {
 	fail.Fail() // XXX
 
 	// Save to blockStore.
-	if cs.blockStore.Height() < block.Height {
+	if cs.blockStore.Height() < block.Height { // !! block store에 block 저장
 		// NOTE: the seenCommit is local justification to commit this block,
 		// but may differ from the LastCommit included in the next block
 		seenExtendedCommit := cs.Votes.Precommits(cs.CommitRound).MakeExtendedCommit(cs.state.ConsensusParams.ABCI)
@@ -1734,7 +1734,7 @@ func (cs *State) finalizeCommit(height int64) {
 
 	// Execute and commit the block, update and save the state, and update the mempool.
 	// NOTE The block.AppHash wont reflect these txs until the next block.
-	stateCopy, err := cs.blockExec.ApplyBlock(
+	stateCopy, err := cs.blockExec.ApplyBlock( // !! block 적용
 		stateCopy,
 		types.BlockID{
 			Hash:          block.Hash(),
@@ -1752,7 +1752,7 @@ func (cs *State) finalizeCommit(height int64) {
 	cs.recordMetrics(height, block)
 
 	// NewHeightStep!
-	cs.updateToState(stateCopy)
+	cs.updateToState(stateCopy) // !! new height
 
 	fail.Fail() // XXX
 
@@ -1763,7 +1763,7 @@ func (cs *State) finalizeCommit(height int64) {
 
 	// cs.StartTime is already set.
 	// Schedule Round0 to start soon.
-	cs.scheduleRound0(&cs.RoundState)
+	cs.scheduleRound0(&cs.RoundState) // !! 모든 과정이 끝났으니 round0로 스케쥴링
 
 	// By here,
 	// * cs.Height has been increment to height+1
@@ -1771,7 +1771,7 @@ func (cs *State) finalizeCommit(height int64) {
 	// * cs.StartTime is set to when we will start round0.
 }
 
-func (cs *State) recordMetrics(height int64, block *types.Block) {
+func (cs *State) recordMetrics(height int64, block *types.Block) { // !! finalizeCommit 호출시에 metric들을 정리해서 기록
 	cs.metrics.Validators.Set(float64(cs.Validators.Size()))
 	cs.metrics.ValidatorsPower.Set(float64(cs.Validators.TotalVotingPower()))
 
@@ -1861,7 +1861,7 @@ func (cs *State) recordMetrics(height int64, block *types.Block) {
 
 //-----------------------------------------------------------------------------
 
-func (cs *State) defaultSetProposal(proposal *types.Proposal) error {
+func (cs *State) defaultSetProposal(proposal *types.Proposal) error { // !! proposal message를 통해서 수행됨(handleMessage)
 	// Already have one
 	// TODO: possibly catch double proposals
 	if cs.Proposal != nil {
@@ -1881,7 +1881,7 @@ func (cs *State) defaultSetProposal(proposal *types.Proposal) error {
 
 	p := proposal.ToProto()
 	// Verify signature
-	if !cs.Validators.GetProposer().PubKey.VerifySignature(
+	if !cs.Validators.GetProposer().PubKey.VerifySignature( // !! proposal의 서명 검증
 		types.ProposalSignBytes(cs.state.ChainID, p), proposal.Signature,
 	) {
 		return ErrInvalidProposalSignature
@@ -1903,7 +1903,7 @@ func (cs *State) defaultSetProposal(proposal *types.Proposal) error {
 // NOTE: block is not necessarily valid.
 // Asynchronously triggers either enterPrevote (before we timeout of propose) or tryFinalizeCommit,
 // once we have the full block.
-func (cs *State) addProposalBlockPart(msg *BlockPartMessage, peerID p2p.ID) (added bool, err error) {
+func (cs *State) addProposalBlockPart(msg *BlockPartMessage, peerID p2p.ID) (added bool, err error) { // !! block part message를 통해서 수행됨(handleMessage)
 	height, round, part := msg.Height, msg.Round, msg.Part
 
 	// Blocks might be reused, so round mismatch is OK
@@ -1914,7 +1914,7 @@ func (cs *State) addProposalBlockPart(msg *BlockPartMessage, peerID p2p.ID) (add
 	}
 
 	// We're not expecting a block part.
-	if cs.ProposalBlockParts == nil {
+	if cs.ProposalBlockParts == nil { // !! 다음 round로 올라갔는데 이전 round에서 보낸 msg가 이제 도착한 경우 무시(error는 아님)
 		cs.metrics.BlockGossipPartsReceived.With("matches_current", "false").Add(1)
 		// NOTE: this can happen when we've gone to a higher round and
 		// then receive parts from the previous round - not necessarily a bad peer.
@@ -1928,7 +1928,7 @@ func (cs *State) addProposalBlockPart(msg *BlockPartMessage, peerID p2p.ID) (add
 		return false, nil
 	}
 
-	added, err = cs.ProposalBlockParts.AddPart(part)
+	added, err = cs.ProposalBlockParts.AddPart(part) // !! proposal block part 추가
 	if err != nil {
 		if errors.Is(err, types.ErrPartSetInvalidProof) || errors.Is(err, types.ErrPartSetUnexpectedIndex) {
 			cs.metrics.BlockGossipPartsReceived.With("matches_current", "false").Add(1)
@@ -1947,12 +1947,12 @@ func (cs *State) addProposalBlockPart(msg *BlockPartMessage, peerID p2p.ID) (add
 	if maxBytes == -1 {
 		maxBytes = int64(types.MaxBlockSizeBytes)
 	}
-	if cs.ProposalBlockParts.ByteSize() > maxBytes {
+	if cs.ProposalBlockParts.ByteSize() > maxBytes { // !! proposal block parts의 전체 크기 검사
 		return added, fmt.Errorf("total size of proposal block parts exceeds maximum block bytes (%d > %d)",
 			cs.ProposalBlockParts.ByteSize(), maxBytes,
 		)
 	}
-	if added && cs.ProposalBlockParts.IsComplete() {
+	if added && cs.ProposalBlockParts.IsComplete() { // !! proposal block part를 모두 받았으면
 		bz, err := io.ReadAll(cs.ProposalBlockParts.GetReader())
 		if err != nil {
 			return added, err
@@ -1969,7 +1969,7 @@ func (cs *State) addProposalBlockPart(msg *BlockPartMessage, peerID p2p.ID) (add
 			return added, err
 		}
 
-		cs.ProposalBlock = block
+		cs.ProposalBlock = block // !! proposal block 셋팅
 
 		// NOTE: it's possible to receive complete proposal blocks for future rounds without having the proposal
 		cs.Logger.Info("received complete proposal block", "height", cs.ProposalBlock.Height, "hash", cs.ProposalBlock.Hash())
@@ -1981,11 +1981,11 @@ func (cs *State) addProposalBlockPart(msg *BlockPartMessage, peerID p2p.ID) (add
 	return added, nil
 }
 
-func (cs *State) handleCompleteProposal(blockHeight int64) {
+func (cs *State) handleCompleteProposal(blockHeight int64) { // !! block part message를 통해서 수행됨(handleMessage)
 	// Update Valid* if we can.
 	prevotes := cs.Votes.Prevotes(cs.Round)
 	blockID, hasTwoThirds := prevotes.TwoThirdsMajority()
-	if hasTwoThirds && !blockID.IsZero() && (cs.ValidRound < cs.Round) {
+	if hasTwoThirds && !blockID.IsZero() && (cs.ValidRound < cs.Round) { // !! proposal block에 대해 +2/3합의를 받았고 nil투표가 아니고 ValidRound보다 나중 round이면
 		if cs.ProposalBlock.HashesTo(blockID.Hash) {
 			cs.Logger.Debug(
 				"updating valid block to new proposal block",
@@ -2010,7 +2010,7 @@ func (cs *State) handleCompleteProposal(blockHeight int64) {
 		if hasTwoThirds { // this is optimisation as this will be triggered when prevote is added
 			cs.enterPrecommit(blockHeight, cs.Round)
 		}
-	} else if cs.Step == cstypes.RoundStepCommit {
+	} else if cs.Step == cstypes.RoundStepCommit { // !! spread logic -> commit단계에서 proposal의 완성을 기다리고 있던 경우
 		// If we're waiting on the proposal block...
 		cs.tryFinalizeCommit(blockHeight)
 	}
@@ -2139,8 +2139,8 @@ func (cs *State) addVoteProcessErr(vote *types.Vote, added bool, err error) (boo
 func (cs *State) addVoteCheckPrevVote(vote *types.Vote, peerID p2p.ID) (ok bool, added bool, err error) {
 	// A precommit for the previous height?
 	// These come in while we wait timeoutCommit
-	if vote.Height+1 == cs.Height && vote.Type == cmtproto.PrecommitType {
-		if cs.Step != cstypes.RoundStepNewHeight {
+	if vote.Height+1 == cs.Height && vote.Type == cmtproto.PrecommitType { // !! timeout commit이 끝나고 새로운 height로 올라간 상황에 precommit vote로 이전 height에 대한 add vote가 들어옴
+		if cs.Step != cstypes.RoundStepNewHeight { // !! step이 new height가 아니면 무시
 			// Late precommit at prior height is ignored
 			cs.Logger.Debug("precommit vote came in after commit timeout and has been ignored", "vote", vote)
 			return false, added, err
@@ -2149,7 +2149,7 @@ func (cs *State) addVoteCheckPrevVote(vote *types.Vote, peerID p2p.ID) (ok bool,
 		added, err = cs.LastCommit.AddVote(vote)
 		if !added {
 			// If the vote wasnt added but there's no error, its a duplicate vote
-			if err == nil {
+			if err == nil { // !! 추가되지 않았는데 error가 없으면 중복 투표
 				cs.metrics.DuplicateVote.Add(1)
 			}
 			return false, added, err
@@ -2163,7 +2163,7 @@ func (cs *State) addVoteCheckPrevVote(vote *types.Vote, peerID p2p.ID) (ok bool,
 		cs.evsw.FireEvent(types.EventVote, vote)
 
 		// if we can skip timeoutCommit and have all the votes now,
-		if cs.config.SkipTimeoutCommit && cs.LastCommit.HasAll() {
+		if cs.config.SkipTimeoutCommit && cs.LastCommit.HasAll() { // !! 모든 투표를 다 받았으면 new height로 이동
 			// go straight to new round (skip timeout commit)
 			// cs.scheduleTimeout(time.Duration(0), cs.Height, 0, cstypes.RoundStepNewHeight)
 			cs.enterNewRound(cs.Height, 0)
@@ -2174,7 +2174,7 @@ func (cs *State) addVoteCheckPrevVote(vote *types.Vote, peerID p2p.ID) (ok bool,
 
 	// Height mismatch is ignored.
 	// Not necessarily a bad peer, but not favorable behavior.
-	if vote.Height != cs.Height {
+	if vote.Height != cs.Height { // !! height가 맞지 않는 경우 해당 vote 무시
 		cs.Logger.Debug("vote ignored and not added", "vote_height", vote.Height, "cs_height", cs.Height, "peer", peerID)
 		return false, added, err
 	}
@@ -2187,7 +2187,7 @@ func (cs *State) addVoteCheckPrevVote(vote *types.Vote, peerID p2p.ID) (ok bool,
 func (cs *State) addVoteVerifyExtensionVote(vote *types.Vote, peerID p2p.ID) (ok bool, extEnabled bool, err error) {
 	// Check to see if the chain is configured to extend votes.
 	extEnabled = cs.state.ConsensusParams.ABCI.VoteExtensionsEnabled(vote.Height)
-	if extEnabled {
+	if extEnabled { // !! extension vote인 경우
 		// The chain is configured to extend votes, check that the vote is
 		// not for a nil block and verify the extensions signature against the
 		// corresponding public key.
@@ -2198,7 +2198,7 @@ func (cs *State) addVoteVerifyExtensionVote(vote *types.Vote, peerID p2p.ID) (ok
 		}
 		// Verify VoteExtension if precommit and not nil
 		// https://github.com/tendermint/tendermint/issues/8487
-		if vote.Type == cmtproto.PrecommitType && !vote.BlockID.IsZero() &&
+		if vote.Type == cmtproto.PrecommitType && !vote.BlockID.IsZero() && // !! vote extention을 처리하기 위해선 precommit vote이고 block이 nil이 아니어야 함(내가 제출한 vote는 스킵)
 			!bytes.Equal(vote.ValidatorAddress, myAddr) { // Skip the VerifyVoteExtension call if the vote was issued by this validator.
 
 			// The core fields of the vote message were already validated in the
@@ -2206,11 +2206,11 @@ func (cs *State) addVoteVerifyExtensionVote(vote *types.Vote, peerID p2p.ID) (ok
 			// Here, we verify the signature of the vote extension included in the vote
 			// message.
 			_, val := cs.state.Validators.GetByIndex(vote.ValidatorIndex)
-			if err := vote.VerifyExtension(cs.state.ChainID, val.PubKey); err != nil {
+			if err := vote.VerifyExtension(cs.state.ChainID, val.PubKey); err != nil { // !! extension signature 검증
 				return false, extEnabled, err
 			}
 
-			err := cs.blockExec.VerifyVoteExtension(context.TODO(), vote)
+			err := cs.blockExec.VerifyVoteExtension(context.TODO(), vote) // !! app단에서 vote extension 검증
 			cs.metrics.MarkVoteExtensionReceived(err == nil)
 			if err != nil {
 				return false, extEnabled, err
@@ -2223,7 +2223,7 @@ func (cs *State) addVoteVerifyExtensionVote(vote *types.Vote, peerID p2p.ID) (ok
 		// TODO punish a peer if it sent a vote with an extension when the feature
 		// is disabled on the network.
 		// https://github.com/tendermint/tendermint/issues/8565
-		if len(vote.Extension) > 0 || len(vote.ExtensionSignature) > 0 {
+		if len(vote.Extension) > 0 || len(vote.ExtensionSignature) > 0 { // !! vote extension이 지원되지 않는 상황에 vote extension이 포함된 vote를 받으면 에러처리
 			err = fmt.Errorf("received vote with vote extension for height %v (extensions disabled) from peer ID %s", vote.Height, peerID)
 			return false, extEnabled, err
 		}
@@ -2233,7 +2233,7 @@ func (cs *State) addVoteVerifyExtensionVote(vote *types.Vote, peerID p2p.ID) (ok
 }
 
 func (cs *State) addVote(vote *types.Vote, peerID p2p.ID, extEnabled bool) (ok bool, added bool, err error) {
-	added, err = cs.Votes.AddVote(vote, peerID, extEnabled)
+	added, err = cs.Votes.AddVote(vote, peerID, extEnabled) // !! 투표 추가
 	if !added {
 		// Either duplicate, or error upon cs.Votes.AddByIndex()
 
@@ -2270,21 +2270,21 @@ func (cs *State) addVoteProcessPrevote(vote *types.Vote, height int64) (ok bool,
 	cs.Logger.Debug("added vote to prevote", "vote", vote, "prevotes", prevotes.StringShort())
 
 	// If +2/3 prevotes for a block or nil for *any* round:
-	if blockID, ok := prevotes.TwoThirdsMajority(); ok {
+	if blockID, ok := prevotes.TwoThirdsMajority(); ok { // !! +2/3합의를 받은 경우
 		// There was a polka!
 		// If we're locked but this is a recent polka, unlock.
 		// If it matches our ProposalBlock, update the ValidBlock
 
 		// Unlock if `cs.LockedRound < vote.Round <= cs.Round`
 		// NOTE: If vote.Round > cs.Round, we'll deal with it when we get to vote.Round
-		if (cs.LockedBlock != nil) &&
+		if (cs.LockedBlock != nil) && // !! locked block이 존재
 			(cs.LockedRound < vote.Round) &&
-			(vote.Round <= cs.Round) &&
-			!cs.LockedBlock.HashesTo(blockID.Hash) {
+			(vote.Round <= cs.Round) && // !! cs.LockedRound < vote.Round <= cs.Round
+			!cs.LockedBlock.HashesTo(blockID.Hash) { // !! locked block이 아닌 다른 block에 대한 투표
 
 			cs.Logger.Debug("unlocking because of POL", "locked_round", cs.LockedRound, "pol_round", vote.Round)
 
-			cs.LockedRound = -1
+			cs.LockedRound = -1 // !! unlock
 			cs.LockedBlock = nil
 			cs.LockedBlockParts = nil
 
@@ -2295,10 +2295,10 @@ func (cs *State) addVoteProcessPrevote(vote *types.Vote, height int64) (ok bool,
 
 		// Update Valid* if we can.
 		// NOTE: our proposal block may be nil or not what received a polka..
-		if len(blockID.Hash) != 0 && (cs.ValidRound < vote.Round) && (vote.Round == cs.Round) {
-			if cs.ProposalBlock.HashesTo(blockID.Hash) {
+		if len(blockID.Hash) != 0 && (cs.ValidRound < vote.Round) && (vote.Round == cs.Round) { // !! nil블록에 대한 투표가 아니고 cs.VAlidRound < vote.Round == cs.Round
+			if cs.ProposalBlock.HashesTo(blockID.Hash) { // !! proposal block에 대한 투표
 				cs.Logger.Debug("updating valid block because of POL", "valid_round", cs.ValidRound, "pol_round", vote.Round)
-				cs.ValidRound = vote.Round
+				cs.ValidRound = vote.Round // !! ValidRound update
 				cs.ValidBlock = cs.ProposalBlock
 				cs.ValidBlockParts = cs.ProposalBlockParts
 			} else {
@@ -2312,7 +2312,7 @@ func (cs *State) addVoteProcessPrevote(vote *types.Vote, height int64) (ok bool,
 				cs.ProposalBlock = nil
 			}
 
-			if !cs.ProposalBlockParts.HasHeader(blockID.PartSetHeader) {
+			if !cs.ProposalBlockParts.HasHeader(blockID.PartSetHeader) { // !! proposal block parts의 header가 투표한 block의 par set header가 아니면 초기화
 				cs.ProposalBlockParts = types.NewPartSetFromHeader(blockID.PartSetHeader)
 			}
 
@@ -2325,22 +2325,22 @@ func (cs *State) addVoteProcessPrevote(vote *types.Vote, height int64) (ok bool,
 
 	// If +2/3 prevotes for *anything* for future round:
 	switch {
-	case cs.Round < vote.Round && prevotes.HasTwoThirdsAny():
+	case cs.Round < vote.Round && prevotes.HasTwoThirdsAny(): // !! 이후 round의 prevote에서 +2/3투표를 받았으면 이후 round로 바로 이동
 		// Round-skip if there is any 2/3+ of votes ahead of us
 		cs.enterNewRound(height, vote.Round)
 
-	case cs.Round == vote.Round && cstypes.RoundStepPrevote <= cs.Step: // current round
-		blockID, ok := prevotes.TwoThirdsMajority()
-		if ok && (cs.isProposalComplete() || len(blockID.Hash) == 0) {
+	case cs.Round == vote.Round && cstypes.RoundStepPrevote <= cs.Step: // current round // !! 현재 round에서
+		blockID, ok := prevotes.TwoThirdsMajority()                    // !! common exit condition
+		if ok && (cs.isProposalComplete() || len(blockID.Hash) == 0) { // !! +2/3합의가 이루어졌고 proposal이 완성되었거나 nil블록이라면 precommit으로
 			cs.enterPrecommit(height, vote.Round)
-		} else if prevotes.HasTwoThirdsAny() {
+		} else if prevotes.HasTwoThirdsAny() { // !! +2/3투표를 받은 상황이면 prevote wait로(더 기다려 봄)
 			cs.enterPrevoteWait(height, vote.Round)
 		}
 
 	case cs.Proposal != nil && 0 <= cs.Proposal.POLRound && cs.Proposal.POLRound == vote.Round:
 		// If the proposal is now complete, enter prevote of cs.Round.
 		if cs.isProposalComplete() {
-			cs.enterPrevote(height, cs.Round)
+			cs.enterPrevote(height, cs.Round) // !! proposal의 ROLRound에 대해서 +2/3합의가 완료됐으면 prevote로 이동
 		}
 	}
 
@@ -2364,24 +2364,24 @@ func (cs *State) addVoteProcessPrecommit(vote *types.Vote, height int64) (ok boo
 		"vote_timestamp", vote.Timestamp,
 		"data", precommits.LogString())
 
-	blockID, ok := precommits.TwoThirdsMajority()
+	blockID, ok := precommits.TwoThirdsMajority() // !! common exit condition
 	if ok {
 		// Executed as TwoThirdsMajority could be from a higher round
-		if cs.Round < vote.Round {
-			cs.enterNewRound(height, vote.Round)
-			cs.enterPrecommit(height, vote.Round)
+		if cs.Round < vote.Round { // !! 이후 round의 precommit에서 +2/3합의가 이루어졌으면
+			cs.enterNewRound(height, vote.Round)  // !! 만일 이후의 round에서 온 precommit 투표가 +2/3합의를 이룬 경우 NewRound로 돌입(이후의 round에서 온것이 아니라면 바로 return이 됨)
+			cs.enterPrecommit(height, vote.Round) // !! 중간에 timeout이 걸리거나 실패를 하는 경우가 생기더라도 강제로 Precommit으로 진행
 		}
 
-		if len(blockID.Hash) != 0 {
+		if len(blockID.Hash) != 0 { // !! non-nil block에 대한 합의면 commit으로 이동
 			cs.enterCommit(height, vote.Round)
 			if cs.config.SkipTimeoutCommit && precommits.HasAll() {
 				cs.enterNewRound(cs.Height, 0)
 			}
 		} else {
-			cs.enterPrecommitWait(height, vote.Round)
+			cs.enterPrecommitWait(height, vote.Round) // !! nil block에 대한 합의면 precommit wait로 이동해서 기다림
 		}
-	} else if cs.Round <= vote.Round && precommits.HasTwoThirdsAny() {
-		cs.enterNewRound(height, vote.Round)
+	} else if cs.Round <= vote.Round && precommits.HasTwoThirdsAny() { // !! 이후 round의 vote가 +2/3투표를 받았으면
+		cs.enterNewRound(height, vote.Round) // !! new round를 거쳐 precommit wait로 이동
 		cs.enterPrecommitWait(height, vote.Round)
 	}
 
@@ -2407,7 +2407,7 @@ func (cs *State) signVote(
 	addr := cs.privValidatorPubKey.Address()
 	valIdx, _ := cs.Validators.GetByAddress(addr)
 
-	vote := &types.Vote{
+	vote := &types.Vote{ // !! 투표 생성
 		ValidatorAddress: addr,
 		ValidatorIndex:   valIdx,
 		Height:           cs.Height,
@@ -2418,11 +2418,11 @@ func (cs *State) signVote(
 	}
 
 	extEnabled := cs.state.ConsensusParams.ABCI.VoteExtensionsEnabled(vote.Height)
-	if msgType == cmtproto.PrecommitType && !vote.BlockID.IsZero() {
+	if msgType == cmtproto.PrecommitType && !vote.BlockID.IsZero() { // !! precommit이고 nil블록이 아니고
 		// if the signedMessage type is for a non-nil precommit, add
 		// VoteExtension
-		if extEnabled {
-			ext, err := cs.blockExec.ExtendVote(context.TODO(), vote)
+		if extEnabled { // !! extension vote가 enable이면
+			ext, err := cs.blockExec.ExtendVote(context.TODO(), vote) // !! extionsion vote 생성
 			if err != nil {
 				return nil, err
 			}
@@ -2430,7 +2430,7 @@ func (cs *State) signVote(
 		}
 	}
 
-	recoverable, err := types.SignAndCheckVote(vote, cs.privValidator, cs.state.ChainID, extEnabled && (msgType == cmtproto.PrecommitType))
+	recoverable, err := types.SignAndCheckVote(vote, cs.privValidator, cs.state.ChainID, extEnabled && (msgType == cmtproto.PrecommitType)) // !! vote에 sign하고 check -> Signature, ExtensionSignature, Timestamp 셋팅
 	if err != nil && !recoverable {
 		panic(fmt.Sprintf("non-recoverable error when signing vote (%d/%d)", vote.Height, vote.Round))
 	}
@@ -2481,18 +2481,18 @@ func (cs *State) signAddVote(
 	}
 
 	// TODO: pass pubKey to signVote
-	vote, err := cs.signVote(msgType, hash, header)
+	vote, err := cs.signVote(msgType, hash, header) // !! 서명한 vote 생성
 	if err != nil {
 		cs.Logger.Error("failed signing vote", "height", cs.Height, "round", cs.Round, "vote", vote, "err", err)
 		return
 	}
 	hasExt := len(vote.ExtensionSignature) > 0
 	extEnabled := cs.state.ConsensusParams.ABCI.VoteExtensionsEnabled(vote.Height)
-	if vote.Type == cmtproto.PrecommitType && !vote.BlockID.IsZero() && hasExt != extEnabled {
+	if vote.Type == cmtproto.PrecommitType && !vote.BlockID.IsZero() && hasExt != extEnabled { // !! precommit vote이고 nil블록 투표가 아닌데 extension vote의 사용 여부화 extension signature의 셋팅 여부가 다르면 안됨
 		panic(fmt.Errorf("vote extension absence/presence does not match extensions enabled %t!=%t, height %d, type %v",
 			hasExt, extEnabled, vote.Height, vote.Type))
 	}
-	cs.sendInternalMessage(msgInfo{&VoteMessage{vote}, ""})
+	cs.sendInternalMessage(msgInfo{&VoteMessage{vote}, ""}) // !! vote message를 internal message로 날림
 	cs.Logger.Debug("signed and pushed vote", "height", cs.Height, "round", cs.Round, "vote", vote)
 }
 
